@@ -527,31 +527,23 @@ app.get("/mach", async (req, res) => {
 
 
 
-
-// ==========================================
-// مسار المشغل المباشر (Web Player)
-// ==========================================
 app.get("/live/:id", async (req, res) => {
     const id_live = req.params.id;
     try {
-        // استخدام نظام الكاش لمنع الضغط عند دخول أكثر من شخص لنفس المشغل
         const cacheKey = `player_${id_live}`;
         const streamData = await fetchWithCacheAndLock(cacheKey, async () => {
             const localBaseUrl = `http://localhost:${PORT}`;
-            // جلب البيانات من المسار الداخلي الذي يحلل الروابط والتوجيهات
             const response = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
             return response.data;
         });
 
         if (!streamData || !streamData.streams || streamData.streams.length === 0) {
-            return res.status(404).send("<h2 style='color:white; text-align:center; font-family:sans-serif; margin-top:20%;'>عذراً، لم يتم العثور على البث</h2>");
+            return res.status(404).send("<body style='background:#000;'><h2 style='color:#E50914; text-align:center; font-family:sans-serif; margin-top:20%;'>عذراً، لم يتم العثور على بث متاح لهذه القناة.</h2></body>");
         }
 
-        // سحب رابط السيرفر الأول المتوفر
         const targetStream = streamData.streams[0];
         let streamUrl = typeof targetStream.url === 'string' ? targetStream.url : (targetStream.data && targetStream.data.url) ? targetStream.data.url : "";
         
-        // تنظيف الرابط في حال كان محفوظاً على شكل JSON نصي
         try {
             if (streamUrl.startsWith("{")) {
                 const parsed = JSON.parse(streamUrl);
@@ -559,9 +551,10 @@ app.get("/live/:id", async (req, res) => {
             }
         } catch(e) {}
 
-        // ---------------------------------------------------------
-        // بناء صفحة المشغل (HTML/CSS/JS)
-        // ---------------------------------------------------------
+        if (!streamUrl) {
+            return res.status(404).send("<body style='background:#000;'><h2 style='color:#E50914; text-align:center; font-family:sans-serif; margin-top:20%;'>خطأ: رابط البث فارغ.</h2></body>");
+        }
+
         const htmlPage = `
         <!DOCTYPE html>
         <html lang="ar" dir="rtl">
@@ -569,88 +562,62 @@ app.get("/live/:id", async (req, res) => {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>مشغل البث</title>
-            <!-- استخدام مكتبة Clappr السريعة والداعمة لصيغ m3u8 بشكل ممتاز -->
-            <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/clappr@latest/dist/clappr.min.js"></script>
+            <!-- استدعاء Clappr والمكتبات الداعمة لصيغ m3u8 و mpd -->
+            <script src="https://cdn.jsdelivr.net/npm/clappr@latest/dist/clappr.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/dash-shaka-playback@latest/dist/dash-shaka-playback.min.js"></script>
             <style>
-                /* تصميم داكن ونظيف ملائم لشاشات التلفاز وتطبيقات الموبايل */
                 body, html {
-                    margin: 0;
-                    padding: 0;
-                    width: 100%;
-                    height: 100%;
-                    background-color: #000000;
-                    overflow: hidden; /* منع التمرير */
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    font-family: Arial, sans-serif;
+                    margin: 0; padding: 0; width: 100%; height: 100%;
+                    background-color: #000000; overflow: hidden;
+                    display: flex; justify-content: center; align-items: center;
                 }
-                
-                #player-wrapper {
-                    width: 100vw;
-                    height: 100vh;
-                    outline: none; /* إزالة الحدود الزرقاء الافتراضية للمتصفح */
-                }
-
-                /* تأثير تركيز (Focus) مخصص وأنيق عند التصفح بالريموت كنترول */
+                #player-wrapper { width: 100vw; height: 100vh; outline: none; }
                 #player-wrapper:focus-within {
                     box-shadow: inset 0 0 0 2px #E50914; 
                     transition: box-shadow 0.3s ease;
                 }
-
-                .loading-text {
-                    color: #ffffff;
-                    font-size: 1.2rem;
-                    position: absolute;
-                    z-index: -1;
-                }
+                .error-text { color: #E50914; font-family: sans-serif; display: none; text-align: center; padding: 20px; }
             </style>
         </head>
         <body>
-            <div class="loading-text">جاري الاتصال بالخادم...</div>
+            <div id="error-msg" class="error-text">حدث خطأ أثناء تحميل المشغل أو أن الرابط غير مدعوم.</div>
             <div id="player-wrapper" tabindex="0"></div>
 
             <script>
                 const streamUrl = "${streamUrl}";
-                
-                if(streamUrl) {
+                try {
                     var player = new Clappr.Player({
                         source: streamUrl,
                         parentId: "#player-wrapper",
-                        width: '100%',
-                        height: '100%',
-                        autoPlay: true,
-                        mute: false,
-                        playback: {
-                            playInline: true,
-                            hlsjsConfig: {
-                                // هنا يتم ضبط إعدادات جلب الـ m3u8
-                                xhrSetup: function(xhr, url) {
-                                    // ملاحظة أمنية: متصفحات الويب تمنع تعديل (User-Agent و Referer) عبر الجافاسكربت (CORS).
-                                    // لتجاوز ذلك في بيئة التطوير الخاصة بك، قم بتمرير الهيدرز برمجياً من داخل عنصر الـ WebView في أندرويد.
-                                }
-                            }
-                        }
+                        width: '100%', height: '100%',
+                        autoPlay: true, mute: false,
+                        plugins: [DashShakaPlayback],
+                        shakaConfiguration: { streaming: { rebufferingGoal: 15 } }
                     });
                     
-                    // إعطاء التركيز التلقائي للمشغل ليتمكن المستخدم من التحكم فوراً
+                    player.on(Clappr.Events.PLAYER_ERROR, function() {
+                        document.getElementById('player-wrapper').style.display = 'none';
+                        const errMsg = document.getElementById('error-msg');
+                        errMsg.style.display = 'block';
+                        errMsg.innerHTML = "فشل تشغيل البث. قد يكون السيرفر المصدر متوقفاً.<br><br><span style='color:gray; font-size:12px;'>" + streamUrl + "</span>";
+                    });
+
                     document.getElementById('player-wrapper').focus();
+                } catch (e) {
+                    document.getElementById('error-msg').style.display = 'block';
                 }
             </script>
         </body>
         </html>
         `;
 
-        // إرسال الصفحة كـ HTML لتُعرض مباشرة
         res.setHeader('Content-Type', 'text/html');
         res.send(htmlPage);
 
     } catch (error) {
-        res.status(500).send("<h2 style='color:white; text-align:center; font-family:sans-serif; margin-top:20%;'>حدث خطأ في النظام</h2>");
+        res.status(500).send("<body style='background:#000;'><h2 style='color:#E50914; text-align:center; font-family:sans-serif; margin-top:20%;'>حدث خطأ في النظام الداخلي</h2></body>");
     }
 });
-
-
 
 // ==========================================
 // مسارات المساعدة والأقسام الثابتة
