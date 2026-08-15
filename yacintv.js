@@ -293,7 +293,28 @@ async function getOrFetchStreams(id_live, baseUrl) {
     
     return await getCachedOrFetch(cacheKey, 300, async () => {
         console.log(`🔄 [Auto-Fetch] جلب وتحديث كاش السيرفرات للقناة: ${id_live}`);
-        const postData = { ... /* نفس الهيكل */ "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live };
+       const postData = {
+    "user_id": "_82668_1785761367217_notloggedin.com_dramalive3",
+    "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
+    "device_api": "28",
+    "version_name": "187",
+    "language": "ar",
+    "timezone": "Europe/Istanbul",
+    "device_type": "phone",
+    "KEY_ACTIVATED_TYPE": "232425",
+    "store": "direct",
+    "isStoreVersion": false,
+    "isPremium": false,
+    "isCoupon_active": false,
+    "hideAds": false,
+    "appCount": "{\"adsFailed\":73,\"adsLoaded\":56,\"adsShowed\":17,\"runCount\":8}",
+    "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
+    "type": "tv",
+    "id_live": id_live,
+    "id": id_live,
+    "live_id": id_live,
+    "channel_id": id_live
+};
         const encryptedBody = encryptAES(JSON.stringify(postData));
         const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedBody, {
             headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" }, timeout: 15000, responseType: "arraybuffer" 
