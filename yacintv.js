@@ -1108,36 +1108,21 @@ app.get("/extract", async (req, res) => {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ==========================================
-// 🆕 مسار المشغل المباشر المحسن /live_stream/:id
+// 🆕 مسار المشغل البسيط /play/:id
 // ==========================================
-app.get("/live_stream/:id", async (req, res) => {
+app.get("/play/:id", async (req, res) => {
     try {
         const id_live = req.params.id;
         if (!id_live) {
-            return res.status(400).send("يرجى إرسال id_live في الرابط");
+            return res.status(400).send("يرجى إرسال id_live");
         }
 
-        const cacheKey = `live_stream_player_${id_live}`;
+        // استخدام نفس منطق /stream لجلب السيرفرات
+        const cacheKey = `play_${id_live}`;
         
-        // جلب روابط البث مع الكاش
-        const streamData = await fetchWithCacheAndLock(cacheKey, async () => {
-            console.log(`🎬 [Live Stream] جلب روابط البث للقناة: ${id_live}`);
-            
+        const streams = await fetchWithCacheAndLock(cacheKey, async () => {
+            // نستخدم نفس كود /stream الموجود عندك
             const postData = {
                 "user_id": "_82668_1785761367217_notloggedin.com_dramalive3",
                 "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
@@ -1185,12 +1170,9 @@ app.get("/live_stream/:id", async (req, res) => {
                 }
             }
 
-            let finalStreamsArray = [];
-            let serverCounter = 1;
+            let validStreams = [];
 
             for (const item of rawStreams) {
-                let serverPayload = null;
-
                 if (item.agent === "redirect" || item.agent === "double_redirect") {
                     try {
                         let currentAgent = item.agent;
@@ -1225,595 +1207,176 @@ app.get("/live_stream/:id", async (req, res) => {
                             });
 
                             const decryptedStr = decryptAES(Buffer.from(redirectRes.data).toString("utf-8"));
-                            serverPayload = JSON.parse(decryptedStr);
+                            const serverPayload = JSON.parse(decryptedStr);
 
-                            if (serverPayload && serverPayload.data && serverPayload.data.agent === "double_redirect") {
-                                currentAgent = "double_redirect";
-                                currentUrl = serverPayload.data.url;
+                            if (serverPayload && serverPayload.data && serverPayload.data.url) {
+                                validStreams.push(serverPayload.data.url);
                             }
                         }
-
-                        if (currentAgent === "double_redirect") {
-                            try {
-                                let parsedObj = JSON.parse(currentUrl);
-                                let fetchHeaders = parsedObj.headers || {};
-                                let resHtml = await axios.get(parsedObj.url, { headers: fetchHeaders, timeout: 10000 });
-                                rawData = typeof resHtml.data === 'string' ? resHtml.data : JSON.stringify(resHtml.data);
-                            } catch (e) {
-                                try {
-                                    let resHtml = await axios.get(currentUrl, { timeout: 10000 });
-                                    rawData = typeof resHtml.data === 'string' ? resHtml.data : JSON.stringify(resHtml.data);
-                                } catch (err) {}
-                            }
-
-                            const doubleRedirectPayload = {
-                                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3",
-                                "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                                "device_api": "28", "version_name": "187", "language": "ar",
-                                "timezone": "Europe/Istanbul", "device_type": "phone",
-                                "KEY_ACTIVATED_TYPE": "232425", "store": "direct",
-                                "isStoreVersion": false, "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                                "appCount": "{\"adsFailed\":496,\"adsLoaded\":251,\"adsShowed\":121,\"runCount\":58}",
-                                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                                "id": id_live,
-                                "url": currentUrl,
-                                "agent": "double_redirect",
-                                "raw_data": rawData 
-                            };
-
-                            const encryptedDoubleBody = encryptAES(JSON.stringify(doubleRedirectPayload));
-                            const doubleRes = await axios.post("http://redirect.1spbgmu.com/redirect/getLiveByDoubleRedirect", encryptedDoubleBody, {
-                                headers: { 
-                                    "Content-Type": "application/json; charset=utf-8", 
-                                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", 
-                                    "Host": "redirect.1spbgmu.com", 
-                                    "Connection": "Keep-Alive",
-                                    "Accept-Encoding": "gzip"
-                                },
-                                timeout: 15000, 
-                                responseType: "arraybuffer"
-                            });
-
-                            const decryptedDoubleStr = decryptAES(Buffer.from(doubleRes.data).toString("utf-8"));
-                            serverPayload = JSON.parse(decryptedDoubleStr);
-                        }
-
                     } catch (err) {
-                        console.error(`❌ خطأ في فك تشفير سيرفر التوجيه:`, err.message);
-                        continue;
+                        // تجاهل الأخطاء
                     }
                 } else {
-                    let innerUrlString = item.url;
-                    if (!innerUrlString.startsWith("{")) {
-                        innerUrlString = JSON.stringify({
-                            "url": item.url,
-                            "agent": item.agent || DEFAULT_USER_AGENT,
-                            "acceptSSL": "1",
-                            "headers": {
-                                "User-Agent": item.agent || DEFAULT_USER_AGENT
-                            }
-                        });
-                    }
-
-                    serverPayload = {
-                        "result": 0,
-                        "message": { "en": "operation succeeded", "ar": "تمت العملية بنجاح" },
-                        "data": {
-                            "url": innerUrlString,
-                            "agent": "advanced"
-                        }
-                    };
-                }
-
-                if (serverPayload && serverPayload.data && serverPayload.data.url) {
-                    finalStreamsArray.push(serverPayload);
+                    // رابط مباشر
+                    validStreams.push(item.url);
                 }
             }
 
-            return finalStreamsArray;
-        });
-
-        // استخراج جميع روابط البث الصالحة
-        let streams = [];
-        for (const stream of streamData) {
-            if (stream.data && stream.data.url) {
+            // استخراج الروابط النهائية
+            let finalUrls = [];
+            for (const urlData of validStreams) {
                 try {
-                    const urlObj = JSON.parse(stream.data.url);
-                    if (urlObj.url && (urlObj.url.includes(".m3u8") || urlObj.url.includes(".mpd"))) {
-                        streams.push({
-                            url: urlObj.url,
-                            name: stream.data.name || stream.name || `سيرفر ${streams.length + 1}`,
-                            headers: urlObj.headers || {},
-                            drm: urlObj.drm || null,
-                            mediatype: urlObj.mediatype || (urlObj.url.includes(".mpd") ? "dash" : "hls")
-                        });
+                    const obj = JSON.parse(urlData);
+                    if (obj.url && (obj.url.includes(".m3u8") || obj.url.includes(".mpd"))) {
+                        finalUrls.push(obj.url);
                     }
                 } catch(e) {
-                    // محاولة استخدام الرابط مباشرة
-                    const directUrl = stream.data.url;
-                    if (directUrl.includes(".m3u8") || directUrl.includes(".mpd")) {
-                        streams.push({
-                            url: directUrl,
-                            name: stream.data.name || stream.name || `سيرفر ${streams.length + 1}`,
-                            headers: {},
-                            drm: null,
-                            mediatype: directUrl.includes(".mpd") ? "dash" : "hls"
-                        });
+                    if (urlData.includes(".m3u8") || urlData.includes(".mpd")) {
+                        finalUrls.push(urlData);
                     }
                 }
             }
-        }
+
+            return finalUrls;
+        });
 
         if (streams.length === 0) {
-            return res.status(404).send(`
-                <html>
-                <head><title>خطأ</title></head>
-                <body style="background:#000;color:#fff;text-align:center;padding-top:50px;font-family:Arial;">
-                    <h2>❌ لم يتم العثور على روابط بث لهذه القناة</h2>
-                    <p>القناة: ${id_live}</p>
-                    <a href="javascript:history.back()" style="color:#e50914;">رجوع</a>
-                </body>
-                </html>
-            `);
+            return res.status(404).send("لا توجد روابط بث متاحة");
         }
 
-        // بناء صفحة HTML مع مشغل الفيديو
-        const html = generatePlayerHTML(id_live, streams);
-        res.send(html);
-
-    } catch (error) {
-        console.error(`❌ خطأ في مسار /live_stream:`, error.message);
-        res.status(500).send(`
-            <html>
-            <head><title>خطأ</title></head>
-            <body style="background:#000;color:#fff;text-align:center;padding-top:50px;font-family:Arial;">
-                <h2>❌ حدث خطأ</h2>
-                <p>${error.message}</p>
-            </body>
-            </html>
-        `);
-    }
-});
-
-// دالة توليد صفحة المشغل
-function generatePlayerHTML(channelId, streams) {
-    const streamsJson = JSON.stringify(streams);
-    
-    return `
+        // بناء صفحة بسيطة
+        const html = `
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>مشغل البث المباشر - ${channelId}</title>
-    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مشغل - ${id_live}</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
         body {
-            background: #0a0a0a;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            color: #fff;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-        
-        .header {
-            background: #1a1a1a;
-            padding: 15px 20px;
-            text-align: center;
-            border-bottom: 1px solid #333;
-        }
-        
-        .header h1 {
-            font-size: 20px;
-            font-weight: bold;
-            color: #e50914;
-        }
-        
-        .player-wrapper {
-            flex: 1;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            margin: 0;
             padding: 20px;
-            position: relative;
-        }
-        
-        .video-container {
-            width: 100%;
-            max-width: 1200px;
-            aspect-ratio: 16/9;
             background: #000;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 0 30px rgba(229, 9, 20, 0.3);
-        }
-        
-        .video-js {
-            width: 100%;
-            height: 100%;
-        }
-        
-        .server-list {
-            background: #1a1a1a;
-            padding: 15px;
-            border-top: 1px solid #333;
-        }
-        
-        .server-list h3 {
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 16px;
-            color: #ccc;
-        }
-        
-        .server-buttons {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-            justify-content: center;
-        }
-        
-        .server-btn {
-            background: #2a2a2a;
+            font-family: Arial, sans-serif;
             color: #fff;
-            border: 2px solid #444;
+        }
+        #videoContainer {
+            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        video {
+            width: 100%;
+            height: auto;
+            background: #000;
+        }
+        .buttons {
+            text-align: center;
+            margin-top: 20px;
+        }
+        button {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
             padding: 10px 20px;
-            border-radius: 25px;
+            margin: 5px;
             cursor: pointer;
-            font-size: 14px;
-            transition: all 0.3s;
-            min-width: 100px;
+            border-radius: 5px;
         }
-        
-        .server-btn:hover {
-            background: #3a3a3a;
-            border-color: #666;
-            transform: translateY(-2px);
+        button:hover {
+            background: #555;
         }
-        
-        .server-btn.active {
+        button.active {
             background: #e50914;
             border-color: #e50914;
-            box-shadow: 0 4px 15px rgba(229, 9, 20, 0.4);
-        }
-        
-        .loading {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            text-align: center;
-            z-index: 10;
-        }
-        
-        .spinner {
-            width: 50px;
-            height: 50px;
-            border: 5px solid #333;
-            border-top: 5px solid #e50914;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 15px;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        .error-toast {
-            position: fixed;
-            bottom: 100px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: #e50914;
-            color: #fff;
-            padding: 10px 20px;
-            border-radius: 5px;
-            display: none;
-            z-index: 100;
-        }
-        
-        @media (max-width: 768px) {
-            .player-wrapper {
-                padding: 10px;
-            }
-            
-            .video-container {
-                border-radius: 8px;
-            }
-            
-            .server-btn {
-                padding: 8px 15px;
-                font-size: 12px;
-                min-width: 80px;
-            }
-            
-            .header h1 {
-                font-size: 16px;
-            }
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>📺 مشغل البث المباشر</h1>
-        <small style="color:#888;">${channelId}</small>
+    <div id="videoContainer">
+        <video id="video" controls autoplay></video>
     </div>
-    
-    <div class="player-wrapper">
-        <div class="video-container">
-            <div class="loading" id="loading">
-                <div class="spinner"></div>
-                <p>جاري تحميل البث...</p>
-            </div>
-            <video id="player" class="video-js vjs-big-play-centered" controls playsinline></video>
-        </div>
-    </div>
-    
-    <div class="server-list">
-        <h3>السيرفرات المتاحة (${streams.length})</h3>
-        <div class="server-buttons" id="serverButtons">
-            ${streams.map((stream, index) => `
-                <button class="server-btn ${index === 0 ? 'active' : ''}" onclick="switchServer(${index})">
-                    ${stream.name}
-                </button>
-            `).join('')}
-        </div>
-    </div>
-    
-    <div class="error-toast" id="errorToast">⚠️ خطأ في التشغيل، جرب سيرفر آخر</div>
+    <div class="buttons" id="buttons"></div>
 
-    <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
-    <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
-        const streams = ${streamsJson};
-        let player = null;
+        const streams = ${JSON.stringify(streams)};
+        const video = document.getElementById('video');
+        const buttonsDiv = document.getElementById('buttons');
         let hls = null;
-        let dashPlayer = null;
-        let currentIndex = 0;
 
-        function showLoading() {
-            document.getElementById('loading').style.display = 'block';
+        function createButtons() {
+            streams.forEach((url, index) => {
+                const btn = document.createElement('button');
+                btn.textContent = 'سيرفر ' + (index + 1);
+                btn.onclick = () => playStream(index);
+                if (index === 0) btn.classList.add('active');
+                buttonsDiv.appendChild(btn);
+            });
         }
 
-        function hideLoading() {
-            document.getElementById('loading').style.display = 'none';
-        }
-
-        function showError() {
-            const toast = document.getElementById('errorToast');
-            toast.style.display = 'block';
-            setTimeout(() => {
-                toast.style.display = 'none';
-            }, 3000);
-        }
-
-        function cleanupPlayers() {
+        function playStream(index) {
+            // تنظيف
             if (hls) {
                 hls.destroy();
                 hls = null;
             }
-            if (dashPlayer) {
-                dashPlayer.reset();
-                dashPlayer = null;
-            }
-            if (player) {
-                player.dispose();
-                player = null;
-            }
-        }
 
-        function initPlayer() {
-            player = videojs('player', {
-                controls: true,
-                autoplay: true,
-                preload: 'auto',
-                fluid: true,
-                liveui: true,
-                html5: {
-                    vhs: {
-                        overrideNative: true
-                    },
-                    nativeAudioTracks: false,
-                    nativeVideoTracks: false
-                }
-            });
-        }
-
-        function switchServer(index) {
-            if (index === currentIndex && player && !player.error()) {
-                return;
-            }
-            
-            currentIndex = index;
-            
             // تحديث الأزرار
-            document.querySelectorAll('.server-btn').forEach((btn, i) => {
+            document.querySelectorAll('button').forEach((btn, i) => {
                 btn.classList.toggle('active', i === index);
             });
-            
-            showLoading();
-            cleanupPlayers();
-            initPlayer();
-            
-            const stream = streams[index];
-            const videoElement = document.querySelector('#player');
-            
-            try {
-                if (stream.mediatype === 'dash') {
-                    // تشغيل DASH
-                    dashPlayer = dashjs.MediaPlayer().create();
-                    dashPlayer.initialize(videoElement, stream.url, true);
-                    dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, hideLoading);
-                    dashPlayer.on(dashjs.MediaPlayer.events.ERROR, () => {
-                        hideLoading();
-                        showError();
-                        switchToNextServer(index);
+
+            const url = streams[index];
+
+            if (url.includes('.mpd')) {
+                // DASH - استخدام video.js أو dash.js
+                video.src = url;
+                video.play().catch(() => {});
+            } else {
+                // HLS
+                if (Hls.isSupported()) {
+                    hls = new Hls();
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        video.play().catch(() => {});
                     });
-                } else {
-                    // تشغيل HLS
-                    if (Hls.isSupported()) {
-                        hls = new Hls({
-                            enableWorker: true,
-                            lowLatencyMode: true,
-                            backBufferLength: 90
-                        });
-                        
-                        hls.loadSource(stream.url);
-                        hls.attachMedia(videoElement);
-                        
-                        hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
-                            hideLoading();
-                            player.play().catch(() => {});
-                        });
-                        
-                        hls.on(Hls.Events.ERROR, function(event, data) {
-                            if (data.fatal) {
-                                hideLoading();
-                                showError();
-                                switchToNextServer(index);
-                            }
-                        });
-                    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-                        // Safari native HLS
-                        player.src({
-                            src: stream.url,
-                            type: 'application/x-mpegURL'
-                        });
-                        player.ready(function() {
-                            hideLoading();
-                            player.play().catch(() => {});
-                        });
-                    } else {
-                        hideLoading();
-                        showError();
-                    }
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = url;
+                    video.play().catch(() => {});
                 }
-            } catch (e) {
-                hideLoading();
-                showError();
-                switchToNextServer(index);
             }
+
+            // الانتقال التلقائي للسيرفر التالي عند الخطأ
+            video.onerror = () => {
+                const nextIndex = (index + 1) % streams.length;
+                setTimeout(() => playStream(nextIndex), 2000);
+            };
         }
 
-        function switchToNextServer(currentIndex) {
-            const nextIndex = (currentIndex + 1) % streams.length;
-            setTimeout(() => {
-                switchServer(nextIndex);
-            }, 2000);
-        }
-
-        // بدء التشغيل
-        document.addEventListener('DOMContentLoaded', function() {
-            initPlayer();
-            switchServer(0);
-        });
-
-        // إعادة المحاولة عند الخطأ
-        player && player.on('error', function() {
-            hideLoading();
-            showError();
-        });
+        createButtons();
+        playStream(0);
     </script>
 </body>
 </html>`;
-}
 
-// 🆕 مسار بروكسي للبث مع حقن الهيدرز
-app.get("/stream_proxy/:id/:serverIndex", async (req, res) => {
-    try {
-        const id_live = req.params.id;
-        const serverIndex = parseInt(req.params.serverIndex);
-        
-        if (!id_live || isNaN(serverIndex)) {
-            return res.status(400).send("معلمات غير صالحة");
-        }
-
-        // جلب البيانات من الكاش
-        const cacheKey = `live_stream_player_${id_live}`;
-        const streamData = appCache.get(cacheKey);
-        
-        if (!streamData) {
-            return res.status(404).send("البيانات غير موجودة في الكاش");
-        }
-
-        // استخراج السيرفر المطلوب
-        let streams = [];
-        for (const stream of streamData) {
-            if (stream.data && stream.data.url) {
-                try {
-                    const urlObj = JSON.parse(stream.data.url);
-                    if (urlObj.url) {
-                        streams.push(urlObj);
-                    }
-                } catch(e) {
-                    streams.push({ url: stream.data.url, headers: {} });
-                }
-            }
-        }
-
-        if (serverIndex >= streams.length) {
-            return res.status(404).send("السيرفر غير موجود");
-        }
-
-        const targetStream = streams[serverIndex];
-        const streamUrl = targetStream.url;
-        const headers = targetStream.headers || {};
-
-        // جلب البث مع الحقن
-        const response = await axios.get(streamUrl, {
-            headers: {
-                "User-Agent": headers["User-Agent"] || DEFAULT_USER_AGENT,
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "keep-alive",
-                ...headers
-            },
-            responseType: "stream",
-            timeout: 30000,
-            maxRedirects: 5,
-            validateStatus: s => s < 500
-        });
-
-        // تمرير الهيدرز
-        res.setHeader("Content-Type", response.headers["content-type"] || "application/vnd.apple.mpegurl");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Headers", "*");
-        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.setHeader("Cache-Control", "no-cache");
-        
-        if (response.headers["content-length"]) {
-            res.setHeader("Content-Length", response.headers["content-length"]);
-        }
-
-        // تمرير البث
-        response.data.pipe(res);
-
-        response.data.on("error", (err) => {
-            console.error(`❌ خطأ في البث:`, err.message);
-            if (!res.headersSent) {
-                res.status(500).send("خطأ في البث");
-            } else {
-                res.end();
-            }
-        });
+        res.send(html);
 
     } catch (error) {
-        console.error(`❌ خطأ في البروكسي:`, error.message);
-        if (!res.headersSent) {
-            res.status(500).send("خطأ في جلب البث");
-        }
+        console.error(`❌ خطأ:`, error.message);
+        res.status(500).send("خطأ: " + error.message);
     }
 });
+
+
+
+
+
+
+
+
+
 
 
 
