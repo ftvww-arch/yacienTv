@@ -1122,10 +1122,8 @@ app.get("/extract", async (req, res) => {
 
 
 
-
-
 // ==========================================
-// 🆕 مسار المشغل المباشر /live_stream/:id
+// 🆕 مسار المشغل المباشر المحسن /live_stream/:id
 // ==========================================
 app.get("/live_stream/:id", async (req, res) => {
     try {
@@ -1307,20 +1305,15 @@ app.get("/live_stream/:id", async (req, res) => {
                     };
                 }
 
-                if (serverPayload) {
-                    serverPayload.name = `سيرفر ${serverCounter}`;
-                    if(serverPayload.data) {
-                        serverPayload.data.name = `سيرفر ${serverCounter}`;
-                    }
+                if (serverPayload && serverPayload.data && serverPayload.data.url) {
                     finalStreamsArray.push(serverPayload);
-                    serverCounter++;
                 }
             }
 
             return finalStreamsArray;
         });
 
-        // استخراج جميع رووابط البث الصالحة
+        // استخراج جميع روابط البث الصالحة
         let streams = [];
         for (const stream of streamData) {
             if (stream.data && stream.data.url) {
@@ -1329,20 +1322,22 @@ app.get("/live_stream/:id", async (req, res) => {
                     if (urlObj.url && (urlObj.url.includes(".m3u8") || urlObj.url.includes(".mpd"))) {
                         streams.push({
                             url: urlObj.url,
-                            name: stream.data.name || stream.name || "سيرفر",
+                            name: stream.data.name || stream.name || `سيرفر ${streams.length + 1}`,
                             headers: urlObj.headers || {},
                             drm: urlObj.drm || null,
                             mediatype: urlObj.mediatype || (urlObj.url.includes(".mpd") ? "dash" : "hls")
                         });
                     }
                 } catch(e) {
-                    if (stream.data.url.includes(".m3u8") || stream.data.url.includes(".mpd")) {
+                    // محاولة استخدام الرابط مباشرة
+                    const directUrl = stream.data.url;
+                    if (directUrl.includes(".m3u8") || directUrl.includes(".mpd")) {
                         streams.push({
-                            url: stream.data.url,
-                            name: stream.data.name || stream.name || "سيرفر",
+                            url: directUrl,
+                            name: stream.data.name || stream.name || `سيرفر ${streams.length + 1}`,
                             headers: {},
                             drm: null,
-                            mediatype: stream.data.url.includes(".mpd") ? "dash" : "hls"
+                            mediatype: directUrl.includes(".mpd") ? "dash" : "hls"
                         });
                     }
                 }
@@ -1350,176 +1345,391 @@ app.get("/live_stream/:id", async (req, res) => {
         }
 
         if (streams.length === 0) {
-            return res.status(404).send("لم يتم العثور على روابط بث لهذه القناة");
+            return res.status(404).send(`
+                <html>
+                <head><title>خطأ</title></head>
+                <body style="background:#000;color:#fff;text-align:center;padding-top:50px;font-family:Arial;">
+                    <h2>❌ لم يتم العثور على روابط بث لهذه القناة</h2>
+                    <p>القناة: ${id_live}</p>
+                    <a href="javascript:history.back()" style="color:#e50914;">رجوع</a>
+                </body>
+                </html>
+            `);
         }
 
         // بناء صفحة HTML مع مشغل الفيديو
-        const html = `
+        const html = generatePlayerHTML(id_live, streams);
+        res.send(html);
+
+    } catch (error) {
+        console.error(`❌ خطأ في مسار /live_stream:`, error.message);
+        res.status(500).send(`
+            <html>
+            <head><title>خطأ</title></head>
+            <body style="background:#000;color:#fff;text-align:center;padding-top:50px;font-family:Arial;">
+                <h2>❌ حدث خطأ</h2>
+                <p>${error.message}</p>
+            </body>
+            </html>
+        `);
+    }
+});
+
+// دالة توليد صفحة المشغل
+function generatePlayerHTML(channelId, streams) {
+    const streamsJson = JSON.stringify(streams);
+    
+    return `
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مشغل البث المباشر - ${id_live}</title>
-    <link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>مشغل البث المباشر - ${channelId}</title>
+    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
     <style>
-        body {
+        * {
             margin: 0;
             padding: 0;
-            background: #000;
-            font-family: 'Segoe UI', Tahoma, sans-serif;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: #0a0a0a;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: #1a1a1a;
+            padding: 15px 20px;
+            text-align: center;
+            border-bottom: 1px solid #333;
+        }
+        
+        .header h1 {
+            font-size: 20px;
+            font-weight: bold;
+            color: #e50914;
+        }
+        
+        .player-wrapper {
+            flex: 1;
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
+            padding: 20px;
+            position: relative;
         }
-        .player-container {
+        
+        .video-container {
             width: 100%;
             max-width: 1200px;
-            padding: 20px;
-            box-sizing: border-box;
+            aspect-ratio: 16/9;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 0 30px rgba(229, 9, 20, 0.3);
         }
+        
         .video-js {
             width: 100%;
-            height: 600px;
-            border-radius: 10px;
-            overflow: hidden;
+            height: 100%;
         }
+        
+        .server-list {
+            background: #1a1a1a;
+            padding: 15px;
+            border-top: 1px solid #333;
+        }
+        
+        .server-list h3 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 16px;
+            color: #ccc;
+        }
+        
         .server-buttons {
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
-            margin-top: 20px;
             justify-content: center;
         }
+        
         .server-btn {
-            background: #1a1a1a;
+            background: #2a2a2a;
             color: #fff;
-            border: 2px solid #333;
+            border: 2px solid #444;
             padding: 10px 20px;
             border-radius: 25px;
             cursor: pointer;
             font-size: 14px;
             transition: all 0.3s;
+            min-width: 100px;
         }
+        
         .server-btn:hover {
-            background: #333;
-            border-color: #fff;
+            background: #3a3a3a;
+            border-color: #666;
+            transform: translateY(-2px);
         }
+        
         .server-btn.active {
             background: #e50914;
             border-color: #e50914;
+            box-shadow: 0 4px 15px rgba(229, 9, 20, 0.4);
         }
-        .error-message {
-            color: #ff0000;
+        
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             text-align: center;
-            margin-top: 20px;
-            display: none;
+            z-index: 10;
         }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #333;
+            border-top: 5px solid #e50914;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error-toast {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #e50914;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 5px;
+            display: none;
+            z-index: 100;
+        }
+        
         @media (max-width: 768px) {
-            .video-js {
-                height: 300px;
+            .player-wrapper {
+                padding: 10px;
+            }
+            
+            .video-container {
+                border-radius: 8px;
+            }
+            
+            .server-btn {
+                padding: 8px 15px;
+                font-size: 12px;
+                min-width: 80px;
+            }
+            
+            .header h1 {
+                font-size: 16px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="player-container">
-        <video id="my-video" class="video-js vjs-default-skin vjs-big-play-centered" controls preload="auto" width="100%" height="600">
-            <source id="video-source" src="${streams[0].url}" type="${streams[0].mediatype === 'dash' ? 'application/dash+xml' : 'application/x-mpegURL'}">
-            <p class="vjs-no-js">
-                To view this video please enable JavaScript, and consider upgrading to a web browser that supports HTML5 video
-            </p>
-        </video>
-
-        <div class="server-buttons" id="server-buttons">
+    <div class="header">
+        <h1>📺 مشغل البث المباشر</h1>
+        <small style="color:#888;">${channelId}</small>
+    </div>
+    
+    <div class="player-wrapper">
+        <div class="video-container">
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>جاري تحميل البث...</p>
+            </div>
+            <video id="player" class="video-js vjs-big-play-centered" controls playsinline></video>
+        </div>
+    </div>
+    
+    <div class="server-list">
+        <h3>السيرفرات المتاحة (${streams.length})</h3>
+        <div class="server-buttons" id="serverButtons">
             ${streams.map((stream, index) => `
                 <button class="server-btn ${index === 0 ? 'active' : ''}" onclick="switchServer(${index})">
                     ${stream.name}
                 </button>
             `).join('')}
         </div>
-
-        <div class="error-message" id="error-message">
-            خطأ في تشغيل البث، جرب سيرفر آخر
-        </div>
     </div>
+    
+    <div class="error-toast" id="errorToast">⚠️ خطأ في التشغيل، جرب سيرفر آخر</div>
 
-    <script src="https://vjs.zencdn.net/7.20.3/video.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dashjs@latest"></script>
+    <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>
+    <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
     <script>
-        const streams = ${JSON.stringify(streams)};
-        let player = videojs('my-video');
-        let currentHls = null;
-        let currentDash = null;
+        const streams = ${streamsJson};
+        let player = null;
+        let hls = null;
+        let dashPlayer = null;
+        let currentIndex = 0;
+
+        function showLoading() {
+            document.getElementById('loading').style.display = 'block';
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        function showError() {
+            const toast = document.getElementById('errorToast');
+            toast.style.display = 'block';
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+
+        function cleanupPlayers() {
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            if (dashPlayer) {
+                dashPlayer.reset();
+                dashPlayer = null;
+            }
+            if (player) {
+                player.dispose();
+                player = null;
+            }
+        }
+
+        function initPlayer() {
+            player = videojs('player', {
+                controls: true,
+                autoplay: true,
+                preload: 'auto',
+                fluid: true,
+                liveui: true,
+                html5: {
+                    vhs: {
+                        overrideNative: true
+                    },
+                    nativeAudioTracks: false,
+                    nativeVideoTracks: false
+                }
+            });
+        }
 
         function switchServer(index) {
+            if (index === currentIndex && player && !player.error()) {
+                return;
+            }
+            
+            currentIndex = index;
+            
             // تحديث الأزرار
             document.querySelectorAll('.server-btn').forEach((btn, i) => {
                 btn.classList.toggle('active', i === index);
             });
-
-            // تنظيف المشغلات السابقة
-            if (currentHls) {
-                currentHls.destroy();
-                currentHls = null;
-            }
-            if (currentDash) {
-                currentDash.reset();
-                currentDash = null;
-            }
-            player.reset();
-
-            const stream = streams[index];
-            const source = document.getElementById('video-source');
             
-            if (stream.mediatype === 'dash') {
-                // تشغيل DASH
-                currentDash = dashjs.MediaPlayer().create();
-                currentDash.initialize(document.querySelector('#my-video'), stream.url, true);
-            } else {
-                // تشغيل HLS
-                if (Hls.isSupported()) {
-                    currentHls = new Hls();
-                    currentHls.loadSource(stream.url);
-                    currentHls.attachMedia(document.querySelector('#my-video'));
-                    currentHls.on(Hls.Events.MANIFEST_PARSED, function() {
-                        player.play();
+            showLoading();
+            cleanupPlayers();
+            initPlayer();
+            
+            const stream = streams[index];
+            const videoElement = document.querySelector('#player');
+            
+            try {
+                if (stream.mediatype === 'dash') {
+                    // تشغيل DASH
+                    dashPlayer = dashjs.MediaPlayer().create();
+                    dashPlayer.initialize(videoElement, stream.url, true);
+                    dashPlayer.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, hideLoading);
+                    dashPlayer.on(dashjs.MediaPlayer.events.ERROR, () => {
+                        hideLoading();
+                        showError();
+                        switchToNextServer(index);
                     });
-                } else if (document.querySelector('#my-video').canPlayType('application/vnd.apple.mpegurl')) {
-                    // Safari native HLS
-                    source.src = stream.url;
-                    source.type = 'application/x-mpegURL';
-                    player.src({ src: stream.url, type: 'application/x-mpegURL' });
-                    player.play();
+                } else {
+                    // تشغيل HLS
+                    if (Hls.isSupported()) {
+                        hls = new Hls({
+                            enableWorker: true,
+                            lowLatencyMode: true,
+                            backBufferLength: 90
+                        });
+                        
+                        hls.loadSource(stream.url);
+                        hls.attachMedia(videoElement);
+                        
+                        hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
+                            hideLoading();
+                            player.play().catch(() => {});
+                        });
+                        
+                        hls.on(Hls.Events.ERROR, function(event, data) {
+                            if (data.fatal) {
+                                hideLoading();
+                                showError();
+                                switchToNextServer(index);
+                            }
+                        });
+                    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                        // Safari native HLS
+                        player.src({
+                            src: stream.url,
+                            type: 'application/x-mpegURL'
+                        });
+                        player.ready(function() {
+                            hideLoading();
+                            player.play().catch(() => {});
+                        });
+                    } else {
+                        hideLoading();
+                        showError();
+                    }
                 }
+            } catch (e) {
+                hideLoading();
+                showError();
+                switchToNextServer(index);
             }
         }
 
-        // بدء التشغيل التلقائي
-        player.ready(function() {
+        function switchToNextServer(currentIndex) {
+            const nextIndex = (currentIndex + 1) % streams.length;
+            setTimeout(() => {
+                switchServer(nextIndex);
+            }, 2000);
+        }
+
+        // بدء التشغيل
+        document.addEventListener('DOMContentLoaded', function() {
+            initPlayer();
             switchServer(0);
         });
 
-        // معالجة الأخطاء
-        player.on('error', function() {
-            document.getElementById('error-message').style.display = 'block';
+        // إعادة المحاولة عند الخطأ
+        player && player.on('error', function() {
+            hideLoading();
+            showError();
         });
     </script>
 </body>
 </html>`;
-
-        res.send(html);
-
-    } catch (error) {
-        console.error(`❌ خطأ في مسار /live_stream:`, error.message);
-        res.status(500).send("حدث خطأ: " + error.message);
-    }
-});
+}
 
 // 🆕 مسار بروكسي للبث مع حقن الهيدرز
-app.get("/live_stream_proxy/:id/:serverIndex", async (req, res) => {
+app.get("/stream_proxy/:id/:serverIndex", async (req, res) => {
     try {
         const id_live = req.params.id;
         const serverIndex = parseInt(req.params.serverIndex);
@@ -1528,12 +1738,13 @@ app.get("/live_stream_proxy/:id/:serverIndex", async (req, res) => {
             return res.status(400).send("معلمات غير صالحة");
         }
 
-        // جلب بيانات السيرفرات من الكاش
+        // جلب البيانات من الكاش
         const cacheKey = `live_stream_player_${id_live}`;
-        const streamData = await fetchWithCacheAndLock(cacheKey, async () => {
-            // نفس منطق الجلب السابق
-            // ... (نفس الكود السابق لجلب السيرفرات)
-        });
+        const streamData = appCache.get(cacheKey);
+        
+        if (!streamData) {
+            return res.status(404).send("البيانات غير موجودة في الكاش");
+        }
 
         // استخراج السيرفر المطلوب
         let streams = [];
@@ -1563,32 +1774,46 @@ app.get("/live_stream_proxy/:id/:serverIndex", async (req, res) => {
             headers: {
                 "User-Agent": headers["User-Agent"] || DEFAULT_USER_AGENT,
                 "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive",
                 ...headers
             },
             responseType: "stream",
             timeout: 30000,
-            maxRedirects: 5
+            maxRedirects: 5,
+            validateStatus: s => s < 500
         });
 
         // تمرير الهيدرز
         res.setHeader("Content-Type", response.headers["content-type"] || "application/vnd.apple.mpegurl");
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Headers", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.setHeader("Cache-Control", "no-cache");
         
+        if (response.headers["content-length"]) {
+            res.setHeader("Content-Length", response.headers["content-length"]);
+        }
+
         // تمرير البث
         response.data.pipe(res);
 
+        response.data.on("error", (err) => {
+            console.error(`❌ خطأ في البث:`, err.message);
+            if (!res.headersSent) {
+                res.status(500).send("خطأ في البث");
+            } else {
+                res.end();
+            }
+        });
+
     } catch (error) {
         console.error(`❌ خطأ في البروكسي:`, error.message);
-        res.status(500).send("خطأ في جلب البث");
+        if (!res.headersSent) {
+            res.status(500).send("خطأ في جلب البث");
+        }
     }
 });
-
-
-
-
-
-
 
 
 
