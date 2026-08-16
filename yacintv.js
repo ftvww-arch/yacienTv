@@ -9,26 +9,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 
 // ==========================================
-// 1. بروكسي الـ API: لجلب بيانات السيرفرات بدون مشاكل CORS
-// ==========================================
-app.get("/api/stream", async (req, res) => {
-    try {
-        const id_live = req.query.id_live;
-        if (!id_live) return res.status(400).json({ error: "id_live is required" });
-
-        // نطلب البيانات من الـ API الأصلي عبر السيرفر (Node.js لا يتأثر بـ CORS)
-        const response = await axios.get(`https://yacintv-api.onrender.com/stream?id_live=${id_live}`);
-        
-        // نرسل البيانات كـ JSON للمتصفح
-        res.json(response.data);
-    } catch (error) {
-        console.error("API Fetch Error:", error.message);
-        res.status(500).json({ error: "فشل الاتصال بالخادم الخارجي للـ API" });
-    }
-});
-
-// ==========================================
-// 2. بروكسي الفيديو: القلب النابض الذي يحقن الهيدرز ويتخطى SSL
+// 1. بروكسي الفيديو: لتخطي الحماية، حقن الهيدرز، وتجاهل SSL
 // ==========================================
 app.get("/proxy", async (req, res) => {
     try {
@@ -44,7 +25,7 @@ app.get("/proxy", async (req, res) => {
             method: "GET",
             url: targetUrl,
             headers: {
-                "User-Agent": customHeaders["User-Agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": customHeaders["User-Agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 "Referer": customHeaders["Referer"] || "",
                 ...customHeaders
             },
@@ -58,12 +39,13 @@ app.get("/proxy", async (req, res) => {
         
         response.data.pipe(res);
     } catch (error) {
+        // لن نطبع الخطأ بالكامل حتى لا يمتلئ الكونسول، فقط رسالة بسيطة
         res.status(500).send("Proxy Error");
     }
 });
 
 // ==========================================
-// 3. واجهة المشغل الذكي (HTML + JS + CSS)
+// 2. واجهة المشغل الذكي (البيانات مدمجة مباشرة بداخلها)
 // ==========================================
 app.get("/play", (req, res) => {
     const htmlContent = `
@@ -72,7 +54,7 @@ app.get("/play", (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>المشغل الذكي</title>
+        <title>المشغل الذكي - نسخة تجريبية</title>
         <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
         <style>
             body {
@@ -132,7 +114,7 @@ app.get("/play", (req, res) => {
     <body>
 
         <div class="player-container">
-            <div id="title">جاري استخراج البث...</div>
+            <div id="title">جاري تهيئة البث التجريبي...</div>
             <video id="videoPlayer" controls autoplay playsinline></video>
             
             <div class="controls">
@@ -148,10 +130,23 @@ app.get("/play", (req, res) => {
             let streamsData = [];
             let currentStreamConfig = null;
 
-            const urlParams = new URLSearchParams(window.location.search);
-            const channelId = urlParams.get('id_live') || 'live_tv_beinsport1';
+            // البيانات التجريبية التي أرسلتها (مدمجة مباشرة)
+            const rawApiData = [
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://dri.drivepointstorage.cyou/fif/three/index.html\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36\\",\\"Referer\\":\\"https://dri.drivepointstorage.cyou/\\"},\\"mediatype\\":\\"hls\\",\\"swap\\":{\\"k9x_\\":\\"\\"}}", "agent": "advanced", "name": "سيرفر 1" }, "name": "سيرفر 1" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://off.officefilesstoragehub.sbs/fif/one/index.html\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36\\",\\"Referer\\":\\"https://off.officefilesstoragehub.sbs/\\"},\\"mediatype\\":\\"hls\\",\\"swap\\":{\\"k9x_\\":\\"\\"}}", "agent": "advanced", "name": "سيرفر 2" }, "name": "سيرفر 2" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://dat2.datadenhosting.cyou/pages/ykyokykpcznq/index.html\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36\\",\\"Referer\\":\\"https://dat2.datadenhosting.cyou/\\"},\\"mediatype\\":\\"hls\\",\\"swap\\":{\\"k9x_\\":\\"\\"}}", "agent": "advanced", "name": "سيرفر 3" }, "name": "سيرفر 3" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 4" }, "name": "سيرفر 4" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 5" }, "name": "سيرفر 5" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 6" }, "name": "سيرفر 6" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 7" }, "name": "سيرفر 7" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 8" }, "name": "سيرفر 8" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 9" }, "name": "سيرفر 9" },
+              { "result": 0, "data": { "url": "{\\"url\\":\\"https://163r39b4prtu.s3.us-east-1.amazonaws.com/hls/0/stream.m3u8\\",\\"agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"acceptSSL\\":\\"1\\",\\"headers\\":{\\"Referer\\":\\"https://gabito.store/1.php\\",\\"User-Agent\\":\\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36\\",\\"Origin\\":\\"https://gabito.store\\"}}", "agent": "advanced", "name": "سيرفر 10" }, "name": "سيرفر 10" },
+              { "result": 0, "data": { "url": "https://pub-10973a05d0414dd1b9f3595532f107b4.r2.dev/hls/0/stream.m3u8", "agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "name": "سيرفر 11" }, "name": "سيرفر 11" },
+              { "result": 0, "data": { "url": "https://pub-10973a05d0414dd1b9f3595532f107b4.r2.dev/hls/0/stream.m3u8", "agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36", "name": "سيرفر 12" }, "name": "سيرفر 12" }
+            ];
 
-            // نظام اعتراض الطلبات (Loader) لتطبيق الـ Swap والبروكسي
+            // نظام اعتراض الطلبات (Loader)
             class ProxyLoader extends Hls.DefaultConfig.loader {
                 constructor(config) { super(config); }
                 load(context, config, callbacks) {
@@ -174,59 +169,49 @@ app.get("/play", (req, res) => {
                 }
             }
 
-            // استخراج وتفكيك بيانات API عبر السيرفر الداخلي
-            async function fetchStreamData() {
-                try {
-                    // التغيير هنا: نطلب من الخادم المحلي بدلاً من الخارجي مباشرة
-                    const response = await fetch(\`/api/stream?id_live=\${channelId}\`);
-                    
-                    if (!response.ok) {
-                        throw new Error('Network response was not ok');
-                    }
+            // فك التشفير وتهيئة السيرفرات (بدون API خارجي)
+            function initTestData() {
+                streamsData = [];
 
-                    const data = await response.json();
-                    streamsData = [];
+                rawApiData.forEach((item, index) => {
+                    let streamObj = { name: item.name || \`سيرفر \${index + 1}\` };
+                    let rawUrl = item.data?.url || item.url;
 
-                    // التأكد من أن البيانات مصفوفة
-                    if (!Array.isArray(data)) {
-                        throw new Error('API لم يرجع مصفوفة بيانات صحيحة');
-                    }
-
-                    data.forEach((item, index) => {
-                        let streamObj = { name: item.name || \`سيرفر \${index + 1}\` };
-                        let rawUrl = item.data?.url || item.url;
-
-                        if (rawUrl && rawUrl.trim().startsWith('{')) {
-                            try {
-                                let parsed = JSON.parse(rawUrl);
-                                streamObj.url = parsed.url;
-                                streamObj.headers = parsed.headers || {};
-                                streamObj.swap = parsed.swap || {};
-                                streamObj.acceptSSL = parsed.acceptSSL || "0";
-                                if (parsed.agent && !streamObj.headers['User-Agent']) {
-                                    streamObj.headers['User-Agent'] = parsed.agent;
-                                }
-                            } catch (e) { console.error("خطأ في فك تشفير JSON:", e); }
-                        } else if (rawUrl) {
-                            streamObj.url = rawUrl;
-                            streamObj.headers = {};
+                    if (rawUrl && typeof rawUrl === 'string' && rawUrl.trim().startsWith('{')) {
+                        try {
+                            let parsed = JSON.parse(rawUrl);
+                            streamObj.url = parsed.url;
+                            streamObj.headers = parsed.headers || {};
+                            streamObj.swap = parsed.swap || {};
+                            streamObj.acceptSSL = parsed.acceptSSL || "0";
+                            
+                            // أخذ User-Agent إذا كان موجوداً بالخارج ولم يكن بالداخل
+                            let explicitAgent = parsed.agent || item.data?.agent;
+                            if (explicitAgent && !streamObj.headers['User-Agent']) {
+                                streamObj.headers['User-Agent'] = explicitAgent;
+                            }
+                        } catch (e) { 
+                            console.error("خطأ في فك تشفير JSON للسيرفر", index + 1, e); 
                         }
-                        
-                        if (streamObj.url) streamsData.push(streamObj);
-                    });
-
-                    if (streamsData.length === 0) {
-                        titleElement.innerText = "لا توجد سيرفرات متاحة";
-                        return;
+                    } else if (rawUrl) {
+                        // للسيرفرات المباشرة مثل 11 و 12
+                        streamObj.url = rawUrl;
+                        streamObj.headers = {};
+                        if (item.data?.agent) {
+                            streamObj.headers['User-Agent'] = item.data.agent;
+                        }
                     }
+                    
+                    if (streamObj.url) streamsData.push(streamObj);
+                });
 
-                    populateServerList();
-                    playStream(0);
-
-                } catch (error) {
-                    console.error("مشكلة مفصلة:", error);
-                    titleElement.innerText = "فشل جلب أو فك تشفير البث (راجع الـ Console)";
+                if (streamsData.length === 0) {
+                    titleElement.innerText = "لا توجد سيرفرات متاحة";
+                    return;
                 }
+
+                populateServerList();
+                playStream(0); // تشغيل السيرفر الأول تلقائياً
             }
 
             function populateServerList() {
@@ -253,7 +238,8 @@ app.get("/play", (req, res) => {
                 if (Hls.isSupported()) {
                     hls = new Hls({
                         pLoader: ProxyLoader,
-                        fLoader: ProxyLoader
+                        fLoader: ProxyLoader,
+                        debug: false
                     });
                     hls.loadSource(videoUrl);
                     hls.attachMedia(video);
@@ -261,6 +247,7 @@ app.get("/play", (req, res) => {
                     
                     hls.on(Hls.Events.ERROR, (event, data) => {
                         if (data.fatal) {
+                            console.warn("خطأ قاطع في التشغيل، جاري التبديل...");
                             let nextIndex = parseInt(index) + 1;
                             if (nextIndex < streamsData.length) {
                                 serverSelect.value = nextIndex;
@@ -277,7 +264,8 @@ app.get("/play", (req, res) => {
                 }
             }
 
-            fetchStreamData();
+            // تشغيل سكربت التهيئة فوراً
+            initTestData();
         </script>
     </body>
     </html>
@@ -287,6 +275,6 @@ app.get("/play", (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log("🚀 Server is running!");
-    console.log(`👉 Open in browser: http://localhost:${PORT}/play?id_live=live_tv_beinsport1`);
+    console.log("🚀 Standalone Test Server is running!");
+    console.log(`👉 Open in browser: http://localhost:${PORT}/play`);
 });
