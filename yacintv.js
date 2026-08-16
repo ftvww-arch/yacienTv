@@ -1108,274 +1108,68 @@ app.get("/extract", async (req, res) => {
 
 
 
-// ==========================================
-// 🆕 مسار المشغل البسيط /play/:id
-// ==========================================
-app.get("/play/:id", async (req, res) => {
+
+
+
+
+
+app.get("/play/:id_live", async (req, res) => {
     try {
-        const id_live = req.params.id;
-        if (!id_live) {
-            return res.status(400).send("يرجى إرسال id_live");
+        const id_live = req.params.id_live;
+        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id_live" });
+
+        const localBaseUrl = `http://localhost:${PORT}`; // استخدام المنفذ الحالي من إعداداتك
+
+        // 1. محاولة جلب السيرفرات من مسار /stream
+        const streamResponse = await apiClient.get(`${localBaseUrl}/stream?id_live=${id_live}`);
+        const streamData = streamResponse.data;
+
+        // إذا كان الرد عبارة عن مصفوفة تحتوي على سيرفرات، نقوم بإرجاعها مباشرة
+        if (Array.isArray(streamData) && streamData.length > 0) {
+            return res.json(streamData);
         }
 
-        // استخدام نفس منطق /stream لجلب السيرفرات
-        const cacheKey = `play_${id_live}`;
-        
-        const streams = await fetchWithCacheAndLock(cacheKey, async () => {
-            // نستخدم نفس كود /stream الموجود عندك
-            const postData = {
-                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3",
-                "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                "device_api": "28", "version_name": "187", "language": "ar",
-                "timezone": "Europe/Istanbul", "device_type": "phone",
-                "KEY_ACTIVATED_TYPE": "232425", "store": "direct",
-                "isStoreVersion": false, "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                "appCount": "{\"adsFailed\":468,\"adsLoaded\":240,\"adsShowed\":116,\"runCount\":54}",
-                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live
-            };
+        // 2. إذا كانت المصفوفة فارغة []، نقوم باستدعاء مسار /last/
+        const lastResponse = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
+        const lastData = lastResponse.data;
 
-            const encryptedBody = encryptAES(JSON.stringify(postData));
-            const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedBody, {
-                headers: { 
-                    "Content-Type": "text/plain", 
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", 
-                    "Host": "live.1spbgmu.com", 
-                    "Connection": "Keep-Alive" 
+        // التحقق من وجود روابط داخل مسار /last/ (يُرجع كائن يحتوي على streams)[cite: 1]
+        if (lastData && lastData.streams && lastData.streams.length > 0) {
+            // نأخذ السيرفر الأول من الرد
+            const firstStream = lastData.streams[0];
+            
+            // تجهيز محتوى الـ url كـ String (نص JSON) ليتطابق مع متطلبات المشغل الخاص بك
+            const urlStringData = JSON.stringify({
+                url: firstStream.url,
+                agent: firstStream.agent || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+                headers: firstStream.headers && Object.keys(firstStream.headers).length > 0 
+                    ? firstStream.headers 
+                    : { "User-Agent": firstStream.agent || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" }
+            });
+
+            // بناء الرد النهائي بالشكل المطلوب
+            const fallbackResponse = {
+                "result": 0,
+                "message": {
+                    "en": "operation succeeded",
+                    "ar": "تمت العملية بنجاح"
                 },
-                timeout: 15000, 
-                responseType: "arraybuffer" 
-            });
-
-            const decryptedResponse = decryptAES(Buffer.from(response.data).toString("utf-8"));
-            const rawJson = JSON.parse(decryptedResponse);
-            const liveData = rawJson.live || {};
-
-            let rawStreams = [];
-            if (liveData.url && liveData.url !== "empty") {
-                rawStreams.push({ url: liveData.url, agent: liveData.agent || "" });
-            }
-
-            if (liveData.backup) {
-                const backupParts = liveData.backup.split("-;-");
-                for (const part of backupParts) {
-                    const trimmedPart = part.trim();
-                    if (!trimmedPart) continue;
-                    const subParts = trimmedPart.split("--");
-                    const linkData = subParts[0] ? subParts[0].trim() : "";
-                    const agentData = subParts[1] ? subParts[1].trim() : "";
-                    if (linkData && linkData !== "empty") {
-                        rawStreams.push({ url: linkData, agent: agentData });
-                    }
+                "data": {
+                    "url": urlStringData,
+                    "agent": "advanced"
                 }
-            }
-
-            let validStreams = [];
-
-            for (const item of rawStreams) {
-                if (item.agent === "redirect" || item.agent === "double_redirect") {
-                    try {
-                        let currentAgent = item.agent;
-                        let currentUrl = item.url;
-                        let rawData = "";
-
-                        if (currentAgent === "redirect") {
-                            const redirectPayload = {
-                                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3",
-                                "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                                "device_api": "28", "version_name": "187", "language": "ar",
-                                "timezone": "Europe/Istanbul", "device_type": "phone",
-                                "KEY_ACTIVATED_TYPE": "232425", "store": "direct",
-                                "isStoreVersion": false, "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                                "appCount": "{\"adsFailed\":468,\"adsLoaded\":240,\"adsShowed\":116,\"runCount\":54}",
-                                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                                "id": id_live,
-                                "url": currentUrl,
-                                "agent": "redirect"
-                            };
-
-                            const encryptedRedirectBody = encryptAES(JSON.stringify(redirectPayload));
-                            const redirectRes = await axios.post("http://redirect.1spbgmu.com/redirect/getLiveByRedirect", encryptedRedirectBody, {
-                                headers: { 
-                                    "Content-Type": "text/plain", 
-                                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", 
-                                    "Host": "redirect.1spbgmu.com", 
-                                    "Connection": "Keep-Alive" 
-                                },
-                                timeout: 15000, 
-                                responseType: "arraybuffer"
-                            });
-
-                            const decryptedStr = decryptAES(Buffer.from(redirectRes.data).toString("utf-8"));
-                            const serverPayload = JSON.parse(decryptedStr);
-
-                            if (serverPayload && serverPayload.data && serverPayload.data.url) {
-                                validStreams.push(serverPayload.data.url);
-                            }
-                        }
-                    } catch (err) {
-                        // تجاهل الأخطاء
-                    }
-                } else {
-                    // رابط مباشر
-                    validStreams.push(item.url);
-                }
-            }
-
-            // استخراج الروابط النهائية
-            let finalUrls = [];
-            for (const urlData of validStreams) {
-                try {
-                    const obj = JSON.parse(urlData);
-                    if (obj.url && (obj.url.includes(".m3u8") || obj.url.includes(".mpd"))) {
-                        finalUrls.push(obj.url);
-                    }
-                } catch(e) {
-                    if (urlData.includes(".m3u8") || urlData.includes(".mpd")) {
-                        finalUrls.push(urlData);
-                    }
-                }
-            }
-
-            return finalUrls;
-        });
-
-        if (streams.length === 0) {
-            return res.status(404).send("لا توجد روابط بث متاحة");
-        }
-
-        // بناء صفحة بسيطة
-        const html = `
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مشغل - ${id_live}</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 20px;
-            background: #000;
-            font-family: Arial, sans-serif;
-            color: #fff;
-        }
-        #videoContainer {
-            width: 100%;
-            max-width: 800px;
-            margin: 0 auto;
-        }
-        video {
-            width: 100%;
-            height: auto;
-            background: #000;
-        }
-        .buttons {
-            text-align: center;
-            margin-top: 20px;
-        }
-        button {
-            background: #333;
-            color: #fff;
-            border: 1px solid #555;
-            padding: 10px 20px;
-            margin: 5px;
-            cursor: pointer;
-            border-radius: 5px;
-        }
-        button:hover {
-            background: #555;
-        }
-        button.active {
-            background: #e50914;
-            border-color: #e50914;
-        }
-    </style>
-</head>
-<body>
-    <div id="videoContainer">
-        <video id="video" controls autoplay></video>
-    </div>
-    <div class="buttons" id="buttons"></div>
-
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <script>
-        const streams = ${JSON.stringify(streams)};
-        const video = document.getElementById('video');
-        const buttonsDiv = document.getElementById('buttons');
-        let hls = null;
-
-        function createButtons() {
-            streams.forEach((url, index) => {
-                const btn = document.createElement('button');
-                btn.textContent = 'سيرفر ' + (index + 1);
-                btn.onclick = () => playStream(index);
-                if (index === 0) btn.classList.add('active');
-                buttonsDiv.appendChild(btn);
-            });
-        }
-
-        function playStream(index) {
-            // تنظيف
-            if (hls) {
-                hls.destroy();
-                hls = null;
-            }
-
-            // تحديث الأزرار
-            document.querySelectorAll('button').forEach((btn, i) => {
-                btn.classList.toggle('active', i === index);
-            });
-
-            const url = streams[index];
-
-            if (url.includes('.mpd')) {
-                // DASH - استخدام video.js أو dash.js
-                video.src = url;
-                video.play().catch(() => {});
-            } else {
-                // HLS
-                if (Hls.isSupported()) {
-                    hls = new Hls();
-                    hls.loadSource(url);
-                    hls.attachMedia(video);
-                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                        video.play().catch(() => {});
-                    });
-                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                    video.src = url;
-                    video.play().catch(() => {});
-                }
-            }
-
-            // الانتقال التلقائي للسيرفر التالي عند الخطأ
-            video.onerror = () => {
-                const nextIndex = (index + 1) % streams.length;
-                setTimeout(() => playStream(nextIndex), 2000);
             };
+
+            return res.json(fallbackResponse);
         }
 
-        createButtons();
-        playStream(0);
-    </script>
-</body>
-</html>`;
-
-        res.send(html);
+        // 3. في حال لم يتم العثور على أي روابط في كلا المسارين، نرجع مصفوفة فارغة
+        return res.json([]); 
 
     } catch (error) {
-        console.error(`❌ خطأ:`, error.message);
-        res.status(500).send("خطأ: " + error.message);
+        res.status(500).json({ error: true, message: error.message });
     }
 });
-
-
-
-
-
-
-
-
 
 
 
