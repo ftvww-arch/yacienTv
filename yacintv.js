@@ -533,48 +533,167 @@ app.get("/mach", async (req, res) => {
 
 
 
-
 app.get("/play/:id_live", async (req, res) => {
     try {
         const id_live = req.params.id_live;
         if (!id_live) return res.status(400).send("يرجى إرسال id_live في المسار");
 
         const localBaseUrl = `http://localhost:${PORT}`;
-        let servers = [];
+        let processedServers = [];
 
-        // 1. استدعاء مسار /stream لجلب السيرفرات
+        // 1. محاولة الحصول على البيانات المعالجة من /last أولاً (لأنه يقوم بالمعالجة الكاملة)
         try {
-            const streamRes = await apiClient.get(`${localBaseUrl}/stream?id_live=${id_live}`);
-            if (Array.isArray(streamRes.data) && streamRes.data.length > 0) {
-                servers = streamRes.data;
-            }
-        } catch (e) {}
+            const lastRes = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
+            const lastData = lastRes.data;
 
-        // 2. إذا كانت النتيجة فارغة []، يتم الاستعانة بمرحلة الفحص لـ /last/
-        if (servers.length === 0) {
-            try {
-                const lastRes = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
-                const lastData = lastRes.data;
-
-                if (lastData?.data?.url) {
-                    servers = [lastData];
-                } else if (lastData?.streams && Array.isArray(lastData.streams)) {
-                    servers = lastData.streams.map((s, idx) => ({
-                        name: s.server_name || `سيرفر ${idx + 1}`,
-                        data: {
-                            url: JSON.stringify({
-                                url: s.url,
-                                agent: s.agent,
-                                headers: s.headers
-                            }),
-                            name: s.server_name || `سيرفر ${idx + 1}`
+            if (lastData?.data?.url) {
+                // حالة سيرفر واحد معالج
+                let url = lastData.data.url;
+                let headers = {};
+                let agent = lastData.data.agent || DEFAULT_AGENT;
+                
+                // محاولة تحليل الـ URL إذا كان JSON
+                try {
+                    if (typeof url === 'string' && url.startsWith('{')) {
+                        const parsed = JSON.parse(url);
+                        if (parsed.url) {
+                            url = parsed.url;
+                            headers = parsed.headers || {};
+                            agent = parsed.agent || agent;
+                            
+                            // التحقق من أن الرابط جاهز للتشغيل
+                            if (!url.includes('.m3u8') && !url.includes('.mpd')) {
+                                // الرابط يحتاج معالجة إضافية
+                                const resolved = await resolveRedirectUrl(id_live, url);
+                                if (resolved && resolved.url) {
+                                    url = resolved.url;
+                                    headers = resolved.headers || headers;
+                                    agent = resolved.agent || agent;
+                                }
+                            }
                         }
-                    }));
+                    }
+                } catch (e) {}
+                
+                if (url && (url.includes('.m3u8') || url.includes('.mpd'))) {
+                    processedServers.push({
+                        name: lastData.name || "سيرفر 1",
+                        url: url,
+                        agent: agent,
+                        headers: headers
+                    });
                 }
-            } catch (e) {}
+            } else if (lastData?.streams && Array.isArray(lastData.streams)) {
+                // حالة عدة سيرفرات معالجة
+                for (let i = 0; i < lastData.streams.length; i++) {
+                    const stream = lastData.streams[i];
+                    if (stream.url && (stream.url.includes('.m3u8') || stream.url.includes('.mpd'))) {
+                        processedServers.push({
+                            name: stream.server_name || `سيرفر ${i + 1}`,
+                            url: stream.url,
+                            agent: stream.agent || DEFAULT_AGENT,
+                            headers: stream.headers || {}
+                        });
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Error fetching from /last:', e.message);
         }
 
-        // 3. بناء صفحة HTML للمشغل مع دعم كامل للهيدرز والـ User-Agent
+        // 2. إذا لم نجد سيرفرات معالجة، نجرب /get-redirect-data
+        if (processedServers.length === 0) {
+            try {
+                const redirectRes = await apiClient.get(`${localBaseUrl}/get-redirect-data?id_live=${id_live}`);
+                const redirectData = redirectRes.data;
+
+                if (redirectData?.data?.url && redirectData.data.url !== "1" && redirectData.data.url !== "empty") {
+                    let url = redirectData.data.url;
+                    let headers = {};
+                    let agent = redirectData.data.agent || DEFAULT_AGENT;
+                    
+                    // تحليل الـ URL
+                    try {
+                        if (typeof url === 'string' && url.startsWith('{')) {
+                            const parsed = JSON.parse(url);
+                            if (parsed.url) {
+                                url = parsed.url;
+                                headers = parsed.headers || {};
+                                agent = parsed.agent || agent;
+                            }
+                        }
+                    } catch (e) {}
+                    
+                    if (url && (url.includes('.m3u8') || url.includes('.mpd'))) {
+                        processedServers.push({
+                            name: "السيرفر الرئيسي",
+                            url: url,
+                            agent: agent,
+                            headers: headers
+                        });
+                    }
+                }
+            } catch (e) {
+                console.error('Error fetching from /get-redirect-data:', e.message);
+            }
+        }
+
+        // 3. إذا لم نجد أي سيرفر معالج، نحاول /stream مع معالجة كل سيرفر
+        if (processedServers.length === 0) {
+            try {
+                const streamRes = await apiClient.get(`${localBaseUrl}/stream?id_live=${id_live}`);
+                
+                if (Array.isArray(streamRes.data) && streamRes.data.length > 0) {
+                    for (let i = 0; i < streamRes.data.length; i++) {
+                        const serverItem = streamRes.data[i];
+                        
+                        try {
+                            let url = serverItem?.data?.url || '';
+                            let agent = serverItem?.data?.agent || '';
+                            let headers = {};
+                            
+                            // تحليل الـ URL
+                            if (typeof url === 'string' && url.startsWith('{')) {
+                                const parsed = JSON.parse(url);
+                                if (parsed.url) {
+                                    url = parsed.url;
+                                    headers = parsed.headers || {};
+                                    agent = parsed.agent || agent;
+                                }
+                            }
+                            
+                            // إذا كان الرابط يحتاج معالجة redirect
+                            if (url && !url.includes('.m3u8') && !url.includes('.mpd')) {
+                                if (url.includes('.LS.V2') || agent === 'redirect' || agent === 'double_redirect') {
+                                    const resolved = await resolveRedirectUrl(id_live, url);
+                                    if (resolved && resolved.url) {
+                                        url = resolved.url;
+                                        headers = resolved.headers || headers;
+                                        agent = resolved.agent || agent;
+                                    }
+                                }
+                            }
+                            
+                            // إضافة السيرفر إذا كان الرابط صالح للتشغيل
+                            if (url && (url.includes('.m3u8') || url.includes('.mpd'))) {
+                                processedServers.push({
+                                    name: serverItem.name || serverItem?.data?.name || `سيرفر ${i + 1}`,
+                                    url: url,
+                                    agent: agent || DEFAULT_AGENT,
+                                    headers: headers
+                                });
+                            }
+                        } catch (e) {
+                            console.error(`Error processing server ${i}:`, e.message);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Error fetching from /stream:', e.message);
+            }
+        }
+
+        // 4. بناء صفحة HTML للمشغل
         const html = `
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -596,113 +715,39 @@ app.get("/play/:id_live", async (req, res) => {
         .btn-server.active { background: #0284c7; border-color: #38bdf8; color: #fff; font-weight: bold; }
         .status-alert { margin-top: 10px; color: #ef4444; font-size: 0.85rem; display: none; }
         .loading-indicator { display: none; margin-top: 10px; color: #38bdf8; font-size: 0.85rem; }
+        .debug-info { margin-top: 10px; padding: 10px; background: #1a1a2e; border-radius: 4px; font-size: 0.75rem; color: #94a3b8; display: none; }
     </style>
 </head>
 <body>
     <div class="player-card">
         <video id="video" controls autoplay playsinline></video>
         <div class="controls-box">
-            <div class="title">سيرفرات البث المباشر المتاحة:</div>
+            <div class="title">سيرفرات البث المباشر المتاحة (${processedServers.length}):</div>
             <div id="serversList" class="servers-wrapper"></div>
             <div id="loadingIndicator" class="loading-indicator">جاري تحميل البث...</div>
             <div id="statusAlert" class="status-alert"></div>
+            <div id="debugInfo" class="debug-info"></div>
         </div>
     </div>
 
     <script>
-        const rawServersData = ${JSON.stringify(servers)};
+        const servers = ${JSON.stringify(processedServers)};
         const video = document.getElementById('video');
         const serversList = document.getElementById('serversList');
         const statusAlert = document.getElementById('statusAlert');
         const loadingIndicator = document.getElementById('loadingIndicator');
+        const debugInfo = document.getElementById('debugInfo');
+        
         let hlsInstance = null;
         let currentServerIndex = 0;
         let fallbackTimeout = null;
 
-        // دالة استخراج بيانات السيرفر مع دعم كامل للـ JSON المتداخل
-        function extractServerData(serverItem, index) {
-            try {
-                let serverName = serverItem?.name || serverItem?.data?.name || ('سيرفر ' + (index + 1));
-                let rawUrl = serverItem?.data?.url || serverItem?.url || '';
-                
-                if (!rawUrl) return null;
-
-                let config = {
-                    url: '',
-                    agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    headers: {},
-                    drm: null,
-                    swap: null
-                };
-
-                // محاولة تحليل الـ URL إذا كان JSON string
-                if (typeof rawUrl === 'string' && rawUrl.startsWith('{')) {
-                    try {
-                        const jsonObj = JSON.parse(rawUrl);
-                        config.url = jsonObj.url || '';
-                        config.agent = jsonObj.agent || config.agent;
-                        config.headers = jsonObj.headers || {};
-                        config.drm = jsonObj.drm || null;
-                        config.swap = jsonObj.swap || null;
-                        
-                        // استخراج User-Agent من headers إذا كان موجوداً
-                        if (config.headers['User-Agent'] || config.headers['user-agent']) {
-                            config.agent = config.headers['User-Agent'] || config.headers['user-agent'];
-                        }
-                    } catch (e) {
-                        config.url = rawUrl;
-                    }
-                } else {
-                    config.url = rawUrl;
-                    // محاولة استخراج headers من المستوى الأعلى
-                    if (serverItem?.data?.headers) {
-                        config.headers = serverItem.data.headers;
-                    }
-                    if (serverItem?.data?.agent) {
-                        config.agent = serverItem.data.agent;
-                    }
-                }
-
-                // تنظيف الـ headers من القيم الفارغة
-                Object.keys(config.headers).forEach(key => {
-                    if (!config.headers[key] || config.headers[key] === '') {
-                        delete config.headers[key];
-                    }
-                });
-
-                return {
-                    name: serverName,
-                    ...config
-                };
-            } catch (e) {
-                console.error('Error extracting server data:', e);
-                return null;
-            }
+        function showDebug(message) {
+            debugInfo.style.display = 'block';
+            debugInfo.textContent = message;
+            console.log(message);
         }
 
-        // دالة تطبيق الـ Swap على الروابط
-        function applySwap(url, swapConfig) {
-            if (!swapConfig || !url) return url;
-            
-            try {
-                const swapKeys = Object.keys(swapConfig);
-                let modifiedUrl = url;
-                
-                swapKeys.forEach(key => {
-                    const value = swapConfig[key];
-                    if (modifiedUrl.includes(key)) {
-                        modifiedUrl = modifiedUrl.replace(new RegExp(key, 'g'), value);
-                    }
-                });
-                
-                return modifiedUrl;
-            } catch (e) {
-                console.error('Error applying swap:', e);
-                return url;
-            }
-        }
-
-        // دالة إنشاء HLS.js مع دعم الهيدرز المخصصة
         function createHlsInstance(streamUrl, headers, agent) {
             if (hlsInstance) {
                 hlsInstance.destroy();
@@ -713,55 +758,59 @@ app.get("/play/:id_live", async (req, res) => {
                 enableWorker: true,
                 lowLatencyMode: true,
                 xhrSetup: function(xhr, url) {
-                    // تطبيق الـ User-Agent
-                    xhr.setRequestHeader('User-Agent', agent);
+                    // تعيين User-Agent
+                    xhr.setRequestHeader('User-Agent', agent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
                     
-                    // تطبيق باقي الهيدرز المخصصة
-                    Object.keys(headers).forEach(key => {
-                        try {
-                            xhr.setRequestHeader(key, headers[key]);
-                        } catch (e) {
-                            console.warn('Cannot set header:', key);
-                        }
-                    });
+                    // تعيين باقي الهيدرز
+                    if (headers && typeof headers === 'object') {
+                        Object.keys(headers).forEach(key => {
+                            try {
+                                if (headers[key] && headers[key] !== '') {
+                                    xhr.setRequestHeader(key, headers[key]);
+                                }
+                            } catch (e) {
+                                console.warn('Cannot set header:', key, e.message);
+                            }
+                        });
+                    }
                 }
             };
 
             if (Hls.isSupported()) {
                 hlsInstance = new Hls(hlsConfig);
-                hlsInstance.loadSource(streamUrl);
-                hlsInstance.attachMedia(video);
                 
                 hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
                     loadingIndicator.style.display = 'none';
+                    statusAlert.style.display = 'none';
+                    showDebug('تم تحميل المانيفست بنجاح');
                     video.play().catch(() => {});
                 });
                 
                 hlsInstance.on(Hls.Events.ERROR, (event, data) => {
                     if (data.fatal) {
-                        console.error('Fatal HLS error:', data);
+                        showDebug('خطأ فادح: ' + data.type + ' - ' + data.details);
                         loadingIndicator.style.display = 'none';
                         statusAlert.style.display = 'block';
                         statusAlert.textContent = 'تعذر تشغيل هذا السيرفر، جاري تجربة سيرفر آخر...';
                         
-                        // الانتقال التلقائي للسيرفر التالي
                         setTimeout(() => {
                             playNextServer();
                         }, 2000);
                     }
                 });
+                
+                hlsInstance.loadSource(streamUrl);
+                hlsInstance.attachMedia(video);
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = streamUrl;
-                video.addEventListener('loadedmetadata', () => {
-                    loadingIndicator.style.display = 'none';
-                });
                 video.play();
+            } else {
+                showDebug('متصفحك لا يدعم HLS');
             }
         }
 
-        // دالة تشغيل سيرفر محدد
         function playServer(index) {
-            if (index >= rawServersData.length) {
+            if (index >= servers.length) {
                 statusAlert.style.display = 'block';
                 statusAlert.textContent = 'جميع السيرفرات فشلت في التشغيل';
                 loadingIndicator.style.display = 'none';
@@ -769,62 +818,36 @@ app.get("/play/:id_live", async (req, res) => {
             }
 
             currentServerIndex = index;
+            const server = servers[index];
             
-            // تحديث الأزرار النشطة
+            // تحديث الأزرار
             document.querySelectorAll('.btn-server').forEach((btn, idx) => {
-                if (idx === index) {
-                    btn.classList.add('active');
-                } else {
-                    btn.classList.remove('active');
-                }
+                btn.classList.toggle('active', idx === index);
             });
 
-            const serverData = extractServerData(rawServersData[index], index);
-            
-            if (!serverData || !serverData.url) {
-                console.error('Invalid server data for index:', index);
-                playNextServer();
-                return;
-            }
-
-            // تطبيق الـ Swap إذا كان موجوداً
-            let finalUrl = serverData.url;
-            if (serverData.swap) {
-                finalUrl = applySwap(finalUrl, serverData.swap);
-            }
-
-            // إظهار مؤشر التحميل
             loadingIndicator.style.display = 'block';
             statusAlert.style.display = 'none';
-
-            console.log('Playing server:', {
-                name: serverData.name,
-                url: finalUrl,
-                agent: serverData.agent,
-                headers: serverData.headers
-            });
-
-            // تنظيف الـ timeout السابق
+            
+            showDebug('تشغيل: ' + server.name + ' - ' + server.url.substring(0, 100) + '...');
+            
             if (fallbackTimeout) {
                 clearTimeout(fallbackTimeout);
             }
-
-            // تشغيل البث مع الهيدرز المخصصة
-            createHlsInstance(finalUrl, serverData.headers, serverData.agent);
-
+            
+            createHlsInstance(server.url, server.headers, server.agent);
+            
             // فحص تلقائي بعد 15 ثانية
             fallbackTimeout = setTimeout(() => {
-                if (video.readyState < 2) { // لم يتم تحميل البيانات بعد
-                    console.log('Server timeout, trying next...');
+                if (video.readyState < 2) {
+                    showDebug('مهلة السيرفر، جاري الانتقال للسيرفر التالي...');
                     playNextServer();
                 }
             }, 15000);
         }
 
-        // دالة الانتقال للسيرفر التالي
         function playNextServer() {
             const nextIndex = currentServerIndex + 1;
-            if (nextIndex < rawServersData.length) {
+            if (nextIndex < servers.length) {
                 playServer(nextIndex);
             } else {
                 statusAlert.style.display = 'block';
@@ -833,33 +856,26 @@ app.get("/play/:id_live", async (req, res) => {
             }
         }
 
-        // دالة تهيئة المشغل
         function initPlayer() {
-            if (!rawServersData || rawServersData.length === 0) {
+            if (!servers || servers.length === 0) {
                 statusAlert.style.display = 'block';
                 statusAlert.textContent = 'عذراً، لم يتم العثور على أي سيرفرات تشغيل لهذه القناة.';
                 return;
             }
 
+            showDebug('تم العثور على ' + servers.length + ' سيرفرات');
+            
             // إنشاء أزرار السيرفرات
-            rawServersData.forEach((serverItem, index) => {
-                const serverData = extractServerData(serverItem, index);
-                if (!serverData || !serverData.url) return;
-
+            servers.forEach((server, index) => {
                 const button = document.createElement('button');
                 button.className = 'btn-server';
-                button.textContent = serverData.name;
+                button.textContent = server.name;
                 button.onclick = () => playServer(index);
                 serversList.appendChild(button);
             });
 
             // تشغيل السيرفر الأول
-            if (serversList.children.length > 0) {
-                playServer(0);
-            } else {
-                statusAlert.style.display = 'block';
-                statusAlert.textContent = 'لا يوجد روابط بث صالحة';
-            }
+            playServer(0);
         }
 
         // بدء التشغيل
@@ -875,6 +891,7 @@ app.get("/play/:id_live", async (req, res) => {
         res.status(500).send("خطأ في تشغيل المسار: " + error.message);
     }
 });
+
 
 
 
