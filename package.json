@@ -1,14 +1,31 @@
 {
-  "name": "smart-video-player",
+  "name": "movie-scraper-api",
   "version": "1.0.0",
-  "description": "Smart Video Player with Proxy & Header Injection",
-  "main": "server.js",
+  "description": "API for scraping movies, seasons, episodes, extracting m3u8 links, and DramaLive streams",
+  "main": "dramalive_api.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node dramalive_api.js",
+    "build": "npm install",
+    "start:drama": "node dramalive_api.js",
+    "dev:drama": "nodemon dramalive_api.js",
+    "start:scraper": "node server.js",
+    "dev:scraper": "nodemon server.js",
+    "start:channels": "node channels_api.js",
+    "dev:channels": "nodemon channels_api.js"
   },
   "dependencies": {
-    "axios": "^1.6.2",
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "crypto-js": "^4.2.0",
+    "express": "^4.19.2",
+    "node-cache": "^5.1.2",
+    "puppeteer": "^22.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
   }
 }
