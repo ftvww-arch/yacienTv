@@ -269,5 +269,5 @@ app.get("/play", (req, res) => {
 // تشغيل الخادم
 app.listen(PORT, () => {
     console.log("🚀 Server is running!");
-    console.log(\`👉 Open in browser: http://localhost:\${PORT}/play?id_live=live_tv_beinsport1\`);
+    console.log(`👉 Open in browser: http://localhost:${PORT}/play?id_live=live_tv_beinsport1`);
 });
