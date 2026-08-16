@@ -535,19 +535,18 @@ app.get("/mach", async (req, res) => {
 
 
 // ==========================================
-// 🆕 مسار تشغيل البث الديناميكي عبر المعرف (Proxy & Swap)
+// 🆕 مسار تشغيل البث الديناميكي (يدعم GET و POST)
 // ==========================================
-app.post('/stream-proxy/:id', async (req, res) => {
+app.all('/stream-proxy/:id', async (req, res) => {
     const channelId = req.params.id; // مثل: live_tv_marrocow1
-    let { Data, Url } = req.body; 
+    let { Data, Url } = req.method === 'POST' ? req.body : req.query; 
     let streamsArray = [];
 
     try {
-        // إذا لم يتم إرسال بيانات أو رابط مباشرة في الـ Body، نقوم بجلبها تلقائياً باستخدام معرف القناة
-        if ((!Data || Data.trim() === "") && (!Url || Url.trim() === "")) {
+        // إذا لم يتم إرسال بيانات أو رابط مباشرة، نقوم بجلبها تلقائياً باستخدام معرف القناة
+        if ((!Data || String(Data).trim() === "") && (!Url || String(Url).trim() === "")) {
             const localBaseUrl = `http://localhost:${PORT}`;
             try {
-                // محاولة جلب بيانات السيرفرات عبر دالة الـ last الموجودة في ملفك
                 const streamResponse = await apiClient.get(`${localBaseUrl}/last/${channelId}`);
                 if (streamResponse.data && streamResponse.data.streams) {
                     streamsArray = streamResponse.data.streams.map(s => ({
@@ -563,9 +562,10 @@ app.post('/stream-proxy/:id', async (req, res) => {
             }
         }
 
-        // المعالجة العادية في حال تم ارسال Data أو Url في الـ Body
-        if (Data && Data.trim() !== "") {
-            let trimmedData = Data.trim();
+        // معالجة البيانات إذا كانت موجودة في الـ Body أو Query
+        let inputData = Data || Url;
+        if (inputData && String(inputData).trim() !== "") {
+            let trimmedData = String(inputData).trim();
             if (trimmedData.startsWith("{")) {
                 let root = JSON.parse(trimmedData);
                 if (root.streams && root.streams.length > 0) {
@@ -591,8 +591,6 @@ app.post('/stream-proxy/:id', async (req, res) => {
             } else if (trimmedData.startsWith("http")) {
                 streamsArray.push({ quality: "سيرفر رئيسي", url: trimmedData });
             }
-        } else if (Url && Url.trim() !== "") {
-            streamsArray.push({ quality: "سيرفر رئيسي", url: Url.trim() });
         }
 
         if (streamsArray.length === 0) {
