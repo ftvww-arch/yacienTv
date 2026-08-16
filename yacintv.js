@@ -537,7 +537,7 @@ app.get("/mach", async (req, res) => {
 // ==========================================
 // 🆕 مسار تشغيل البث الديناميكي عبر المعرف (Proxy & Swap)
 // ==========================================
-app.post('/play/:id', async (req, res) => {
+app.post('/stream-proxy/:id', async (req, res) => {
     const channelId = req.params.id; // مثل: live_tv_marrocow1
     let { Data, Url } = req.body; 
     let streamsArray = [];
