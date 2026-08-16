@@ -532,256 +532,148 @@ app.get("/mach", async (req, res) => {
 
 
 
-
-
-
-
-
-
-
 // ==========================================
-// 1. مسار البروكسي لحقن الهيدرز (User-Agent / Referer / Origin)
+// 🆕 مسار تشغيل البث وحقن الهيدرز (Proxy & Swap)
 // ==========================================
-app.get("/proxy-stream", async (req, res) => {
+app.post('/stream-proxy', async (req, res) => {
+    // استقبال البيانات 
+    const { Data, Url } = req.body; 
+    let streamsArray = [];
+    let channelName = "";
+    let isNewFormat = false;
+
     try {
-        const targetUrl = req.query.url;
-        if (!targetUrl) return res.status(400).send("رابط البث غير موجود");
+        if (Data && Data.trim() !== "") {
+            let trimmedData = Data.trim();
 
-        // استخراج الهيدرز الممررة
-        let customHeaders = {};
-        if (req.query.headers) {
-            try {
-                customHeaders = JSON.parse(Buffer.from(req.query.headers, 'base64').toString('utf-8'));
-            } catch (e) {
-                try { customHeaders = JSON.parse(req.query.headers); } catch (err) {}
-            }
-        }
-
-        const requestHeaders = {
-            "User-Agent": DEFAULT_AGENT,
-            ...customHeaders
-        };
-
-        // حذف هيدرز قد تسبب تعارض
-        delete requestHeaders.host;
-        delete requestHeaders.connection;
-
-        // إرسال الطلب للسيرفر الأصلي بالهيدرز المحقونة
-        const response = await axios.get(targetUrl, {
-            headers: requestHeaders,
-            responseType: 'arraybuffer',
-            timeout: 15000,
-            validateStatus: () => true
-        });
-
-        const contentType = response.headers['content-type'] || '';
-        const isM3u8 = targetUrl.includes('.m3u8') || contentType.includes('mpegurl') || contentType.includes('m3u');
-
-        if (isM3u8) {
-            let playlistText = Buffer.from(response.data).toString('utf-8');
-            const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-            const encodedHeaders = Buffer.from(JSON.stringify(customHeaders)).toString('base64');
-
-            // إعادة كتابة روابط أجزاء البث داخل ملف m3u8 تمر عبر البروكسي أيضاً مع الحفاظ على الهيدرز
-            const lines = playlistText.split('\n');
-            const newLines = lines.map(line => {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith('#')) {
-                    if (trimmed.includes('URI="')) {
-                        return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
-                            let fullUri = uri.startsWith('http') ? uri : new URL(uri, baseUrl).href;
-                            return `URI="/proxy-stream?url=${encodeURIComponent(fullUri)}&headers=${encodeURIComponent(encodedHeaders)}"`;
+            if (trimmedData.startsWith("{")) {
+                let root = JSON.parse(trimmedData);
+                
+                if (root.streams && root.streams.length > 0) {
+                    isNewFormat = true;
+                    streamsArray = root.streams;
+                    channelName = root.name || "";
+                } else if (root.channel) {
+                    channelName = root.channel.name || "";
+                    streamsArray = root.sources || [];
+                } else if (root.data && root.data.url) {
+                    streamsArray.push({
+                        quality: "سيرفر رئيسي",
+                        server_name: root.name || "سيرفر رئيسي",
+                        url: root.data.url.trim(),
+                        agent: root.data.agent || ""
+                    });
+                    isNewFormat = true;
+                }
+            } 
+            else if (trimmedData.startsWith("[")) {
+                let rootArray = JSON.parse(trimmedData);
+                rootArray.forEach((item, index) => {
+                    if (item.data && item.data.url) {
+                        let sName = item.name || `سيرفر ${index + 1}`;
+                        streamsArray.push({
+                            quality: sName,
+                            server_name: sName,
+                            url: item.data.url.trim(),
+                            agent: item.data.agent || ""
                         });
                     }
-                    return line;
-                }
-                let fullSegmentUrl = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
-                return `/proxy-stream?url=${encodeURIComponent(fullSegmentUrl)}&headers=${encodeURIComponent(encodedHeaders)}`;
-            });
+                });
+                isNewFormat = true;
+                if (streamsArray.length > 0) channelName = streamsArray[0].server_name;
+            } 
+            else if (trimmedData.startsWith("http")) {
+                streamsArray.push({ quality: "سيرفر رئيسي", url: trimmedData });
+            }
+        } else if (Url && Url.trim() !== "") {
+            streamsArray.push({ quality: "سيرفر رئيسي", url: Url.trim() });
+        }
 
-            res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            return res.send(newLines.join('\n'));
+        if (streamsArray.length === 0) {
+            return res.status(404).json({ error: "لا توجد سيرفرات متاحة للبث" });
+        }
+
+        let selectedStream = streamsArray[0];
+        let rawUrl = selectedStream.url;
+        
+        let videoUrl = rawUrl;
+        let headers = {
+            // استخدام DEFAULT_AGENT المعرف مسبقاً في ملفك
+            "User-Agent": selectedStream.agent || DEFAULT_AGENT 
+        };
+        let swapKey = "";
+        let swapValue = "";
+        let acceptSSL = selectedStream.acceptSSL === "1";
+
+        if (rawUrl.startsWith("{") && rawUrl.endsWith("}")) {
+            let nested = JSON.parse(rawUrl);
+            videoUrl = nested.url;
+            if (nested.agent) headers["User-Agent"] = nested.agent;
+            
+            if (nested.swap) {
+                swapKey = Object.keys(nested.swap)[0];
+                swapValue = nested.swap[swapKey];
+            }
+            if (nested.headers) {
+                Object.assign(headers, nested.headers);
+            }
         } else {
-            // إرجاع أجزاء الفيديو (.ts) أو الصور
-            if (response.headers['content-type']) res.setHeader('Content-Type', response.headers['content-type']);
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            return res.send(Buffer.from(response.data));
-        }
-    } catch (error) {
-        res.status(500).send("خطأ في البروكسي: " + error.message);
-    }
-});
-
-// ==========================================
-// 2. مسار المشغل الرئيسي /play/:id_live
-// ==========================================
-app.get("/play/:id_live", async (req, res) => {
-    try {
-        const id_live = req.params.id_live;
-        if (!id_live) return res.status(400).send("يرجى إرسال id_live في المسار");
-
-        const localBaseUrl = `http://localhost:${PORT}`;
-        let rawServers = [];
-
-        // 1. تجربة جلب السيرفرات من /stream
-        try {
-            const streamRes = await axios.get(`${localBaseUrl}/stream?id_live=${id_live}`);
-            if (Array.isArray(streamRes.data) && streamRes.data.length > 0) {
-                rawServers = streamRes.data;
+            if (selectedStream.swap) {
+                swapKey = Object.keys(selectedStream.swap)[0];
+                swapValue = selectedStream.swap[swapKey];
             }
-        } catch (e) {}
-
-        // 2. إذا كان الرد [] فارغاً، الاستعانة بـ /last
-        if (rawServers.length === 0) {
-            try {
-                const lastRes = await axios.get(`${localBaseUrl}/last/${id_live}`);
-                const lastData = lastRes.data;
-                if (lastData?.data?.url) {
-                    rawServers = [lastData];
-                } else if (lastData?.streams && Array.isArray(lastData.streams)) {
-                    rawServers = lastData.streams.map((s, idx) => ({
-                        name: s.server_name || `سيرفر ${idx + 1}`,
-                        data: {
-                            url: JSON.stringify({ url: s.url, agent: s.agent, headers: s.headers }),
-                            name: s.server_name || `سيرفر ${idx + 1}`
-                        }
-                    }));
-                }
-            } catch (e) {}
+            if (selectedStream.headers) {
+                Object.assign(headers, selectedStream.headers);
+            }
         }
 
-        // 3. تجهيز قائمة السيرفرات وتحويل روابطها عبر البروكسي المحكم
-        const processedServers = rawServers.map((item, index) => {
-            const rawUrl = item?.data?.url || item?.url || '';
-            let parsedObj = {};
-            try {
-                parsedObj = typeof rawUrl === 'string' && rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-            } catch (e) {
-                parsedObj = { url: rawUrl };
-            }
+        const axiosConfig = {
+            method: 'GET',
+            url: videoUrl,
+            headers: headers,
+            responseType: 'stream',
+            timeout: 15000 // مهلة للطلب لتجنب تعليق السيرفر
+        };
 
-            const streamUrl = parsedObj.url || '';
-            const headers = parsedObj.headers || {};
-            if (parsedObj.agent && !headers['User-Agent']) {
-                headers['User-Agent'] = parsedObj.agent;
-            }
+        if (acceptSSL) {
+            axiosConfig.httpsAgent = new https.Agent({ rejectUnauthorized: false });
+        }
 
-            // تشفير الهيدرز لإرسالها للبروكسي
-            const encodedHeaders = Buffer.from(JSON.stringify(headers)).toString('base64');
-            const proxiedUrl = streamUrl ? `/proxy-stream?url=${encodeURIComponent(streamUrl)}&headers=${encodeURIComponent(encodedHeaders)}` : '';
+        // إرسال الطلب لقلب البث
+        const response = await axios(axiosConfig);
 
-            return {
-                name: item.name || item?.data?.name || `سيرفر ${index + 1}`,
-                proxiedUrl: proxiedUrl,
-                originalUrl: streamUrl
-            };
-        }).filter(s => s.proxiedUrl !== '');
+        const contentType = response.headers['content-type'] || 'application/x-mpegURL';
+        res.set({
+            'Content-Type': contentType,
+            'Access-Control-Allow-Origin': '*'
+        });
 
-        // 4. بناء مشغل HTML مع دعم HLS
-        const html = `
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مشغل البث المباشر</title>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
-        body { background: #0b0f19; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
-        .player-card { width: 100%; max-width: 900px; background: #161f30; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.6); }
-        video { width: 100%; aspect-ratio: 16/9; background: #000; display: block; }
-        .controls-box { padding: 16px 20px; }
-        .title { font-size: 0.95rem; color: #38bdf8; margin-bottom: 12px; font-weight: 600; }
-        .servers-wrapper { display: flex; gap: 8px; flex-wrap: wrap; }
-        .btn-server { background: #233148; color: #cbd5e1; border: 1px solid #334155; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
-        .btn-server:hover { background: #334155; color: #fff; }
-        .btn-server.active { background: #0284c7; border-color: #38bdf8; color: #fff; font-weight: bold; }
-        .status-alert { margin-top: 10px; color: #ef4444; font-size: 0.85rem; display: none; }
-    </style>
-</head>
-<body>
-    <div class="player-card">
-        <video id="video" controls autoplay playsinline></video>
-        <div class="controls-box">
-            <div class="title">اختر سيرفر البث المباشر:</div>
-            <div id="serversList" class="servers-wrapper"></div>
-            <div id="statusAlert" class="status-alert"></div>
-        </div>
-    </div>
-
-    <script>
-        const servers = ${JSON.stringify(processedServers)};
-        const video = document.getElementById('video');
-        const serversList = document.getElementById('serversList');
-        const statusAlert = document.getElementById('statusAlert');
-        let hlsInstance = null;
-
-        function initPlayer() {
-            if (!servers || servers.length === 0) {
-                statusAlert.style.display = 'block';
-                statusAlert.textContent = 'عذراً، لا توجد سيرفرات متاحة حالياً لهذه القناة.';
-                return;
-            }
-
-            servers.forEach((server, index) => {
-                const button = document.createElement('button');
-                button.className = 'btn-server';
-                button.textContent = server.name;
-                button.onclick = () => playStream(server.proxiedUrl, button);
-
-                serversList.appendChild(button);
-
-                if (index === 0) {
-                    playStream(server.proxiedUrl, button);
-                }
+        // تطبيق الاستبدال (Swap) طيراناً إذا كان الملف النصي من نوع M3U8 أو DASH
+        if (swapKey && (contentType.includes('mpegurl') || contentType.includes('dash+xml'))) {
+            let chunks = [];
+            response.data.on('data', chunk => chunks.push(chunk));
+            response.data.on('end', () => {
+                let body = Buffer.concat(chunks).toString('utf8');
+                body = body.split(swapKey).join(swapValue);
+                res.send(body);
             });
+        } else {
+            // تمرير البث المباشر كما هو
+            response.data.pipe(res);
         }
 
-        function playStream(proxiedUrl, activeBtn) {
-            document.querySelectorAll('.btn-server').forEach(btn => btn.classList.remove('active'));
-            if (activeBtn) activeBtn.classList.add('active');
-            statusAlert.style.display = 'none';
-
-            if (hlsInstance) {
-                hlsInstance.destroy();
-            }
-
-            if (Hls.isSupported()) {
-                hlsInstance = new Hls({
-                    enableWorker: true,
-                    lowLatencyMode: true
-                });
-                hlsInstance.loadSource(proxiedUrl);
-                hlsInstance.attachMedia(video);
-                hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play().catch(() => {});
-                });
-                hlsInstance.on(Hls.Events.ERROR, (event, data) => {
-                    if (data.fatal) {
-                        statusAlert.style.display = 'block';
-                        statusAlert.textContent = 'حدث خطأ في تشغيل السيرفر الحالي، جرب سيرفر آخر.';
-                    }
-                });
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = proxiedUrl;
-                video.play();
-            }
-        }
-
-        initPlayer();
-    </script>
-</body>
-</html>
-        `;
-
-        res.setHeader("Content-Type", "text/html");
-        res.send(html);
     } catch (error) {
-        res.status(500).send("خطأ في تشغيل المسار: " + error.message);
+        console.error("Stream Proxy Error:", error.message);
+        res.status(500).json({ error: "فشل في تشغيل البث", details: error.message });
     }
 });
+
+
+
+
+
+
+
 
 
 
