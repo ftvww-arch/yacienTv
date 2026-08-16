@@ -533,6 +533,7 @@ app.get("/mach", async (req, res) => {
 
 
 
+
 app.get("/play/:id_live", async (req, res) => {
     try {
         const id_live = req.params.id_live;
@@ -573,7 +574,7 @@ app.get("/play/:id_live", async (req, res) => {
             } catch (e) {}
         }
 
-        // 3. بناء صفحة HTML للمشغل وتضمين بيانات السيرفرات بداخله
+        // 3. بناء صفحة HTML للمشغل مع دعم كامل للهيدرز والـ User-Agent
         const html = `
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -594,6 +595,7 @@ app.get("/play/:id_live", async (req, res) => {
         .btn-server:hover { background: #334155; color: #fff; }
         .btn-server.active { background: #0284c7; border-color: #38bdf8; color: #fff; font-weight: bold; }
         .status-alert { margin-top: 10px; color: #ef4444; font-size: 0.85rem; display: none; }
+        .loading-indicator { display: none; margin-top: 10px; color: #38bdf8; font-size: 0.85rem; }
     </style>
 </head>
 <body>
@@ -602,6 +604,7 @@ app.get("/play/:id_live", async (req, res) => {
         <div class="controls-box">
             <div class="title">سيرفرات البث المباشر المتاحة:</div>
             <div id="serversList" class="servers-wrapper"></div>
+            <div id="loadingIndicator" class="loading-indicator">جاري تحميل البث...</div>
             <div id="statusAlert" class="status-alert"></div>
         </div>
     </div>
@@ -611,8 +614,226 @@ app.get("/play/:id_live", async (req, res) => {
         const video = document.getElementById('video');
         const serversList = document.getElementById('serversList');
         const statusAlert = document.getElementById('statusAlert');
+        const loadingIndicator = document.getElementById('loadingIndicator');
         let hlsInstance = null;
+        let currentServerIndex = 0;
+        let fallbackTimeout = null;
 
+        // دالة استخراج بيانات السيرفر مع دعم كامل للـ JSON المتداخل
+        function extractServerData(serverItem, index) {
+            try {
+                let serverName = serverItem?.name || serverItem?.data?.name || ('سيرفر ' + (index + 1));
+                let rawUrl = serverItem?.data?.url || serverItem?.url || '';
+                
+                if (!rawUrl) return null;
+
+                let config = {
+                    url: '',
+                    agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    headers: {},
+                    drm: null,
+                    swap: null
+                };
+
+                // محاولة تحليل الـ URL إذا كان JSON string
+                if (typeof rawUrl === 'string' && rawUrl.startsWith('{')) {
+                    try {
+                        const jsonObj = JSON.parse(rawUrl);
+                        config.url = jsonObj.url || '';
+                        config.agent = jsonObj.agent || config.agent;
+                        config.headers = jsonObj.headers || {};
+                        config.drm = jsonObj.drm || null;
+                        config.swap = jsonObj.swap || null;
+                        
+                        // استخراج User-Agent من headers إذا كان موجوداً
+                        if (config.headers['User-Agent'] || config.headers['user-agent']) {
+                            config.agent = config.headers['User-Agent'] || config.headers['user-agent'];
+                        }
+                    } catch (e) {
+                        config.url = rawUrl;
+                    }
+                } else {
+                    config.url = rawUrl;
+                    // محاولة استخراج headers من المستوى الأعلى
+                    if (serverItem?.data?.headers) {
+                        config.headers = serverItem.data.headers;
+                    }
+                    if (serverItem?.data?.agent) {
+                        config.agent = serverItem.data.agent;
+                    }
+                }
+
+                // تنظيف الـ headers من القيم الفارغة
+                Object.keys(config.headers).forEach(key => {
+                    if (!config.headers[key] || config.headers[key] === '') {
+                        delete config.headers[key];
+                    }
+                });
+
+                return {
+                    name: serverName,
+                    ...config
+                };
+            } catch (e) {
+                console.error('Error extracting server data:', e);
+                return null;
+            }
+        }
+
+        // دالة تطبيق الـ Swap على الروابط
+        function applySwap(url, swapConfig) {
+            if (!swapConfig || !url) return url;
+            
+            try {
+                const swapKeys = Object.keys(swapConfig);
+                let modifiedUrl = url;
+                
+                swapKeys.forEach(key => {
+                    const value = swapConfig[key];
+                    if (modifiedUrl.includes(key)) {
+                        modifiedUrl = modifiedUrl.replace(new RegExp(key, 'g'), value);
+                    }
+                });
+                
+                return modifiedUrl;
+            } catch (e) {
+                console.error('Error applying swap:', e);
+                return url;
+            }
+        }
+
+        // دالة إنشاء HLS.js مع دعم الهيدرز المخصصة
+        function createHlsInstance(streamUrl, headers, agent) {
+            if (hlsInstance) {
+                hlsInstance.destroy();
+                hlsInstance = null;
+            }
+
+            const hlsConfig = {
+                enableWorker: true,
+                lowLatencyMode: true,
+                xhrSetup: function(xhr, url) {
+                    // تطبيق الـ User-Agent
+                    xhr.setRequestHeader('User-Agent', agent);
+                    
+                    // تطبيق باقي الهيدرز المخصصة
+                    Object.keys(headers).forEach(key => {
+                        try {
+                            xhr.setRequestHeader(key, headers[key]);
+                        } catch (e) {
+                            console.warn('Cannot set header:', key);
+                        }
+                    });
+                }
+            };
+
+            if (Hls.isSupported()) {
+                hlsInstance = new Hls(hlsConfig);
+                hlsInstance.loadSource(streamUrl);
+                hlsInstance.attachMedia(video);
+                
+                hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                    loadingIndicator.style.display = 'none';
+                    video.play().catch(() => {});
+                });
+                
+                hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        console.error('Fatal HLS error:', data);
+                        loadingIndicator.style.display = 'none';
+                        statusAlert.style.display = 'block';
+                        statusAlert.textContent = 'تعذر تشغيل هذا السيرفر، جاري تجربة سيرفر آخر...';
+                        
+                        // الانتقال التلقائي للسيرفر التالي
+                        setTimeout(() => {
+                            playNextServer();
+                        }, 2000);
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = streamUrl;
+                video.addEventListener('loadedmetadata', () => {
+                    loadingIndicator.style.display = 'none';
+                });
+                video.play();
+            }
+        }
+
+        // دالة تشغيل سيرفر محدد
+        function playServer(index) {
+            if (index >= rawServersData.length) {
+                statusAlert.style.display = 'block';
+                statusAlert.textContent = 'جميع السيرفرات فشلت في التشغيل';
+                loadingIndicator.style.display = 'none';
+                return;
+            }
+
+            currentServerIndex = index;
+            
+            // تحديث الأزرار النشطة
+            document.querySelectorAll('.btn-server').forEach((btn, idx) => {
+                if (idx === index) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+
+            const serverData = extractServerData(rawServersData[index], index);
+            
+            if (!serverData || !serverData.url) {
+                console.error('Invalid server data for index:', index);
+                playNextServer();
+                return;
+            }
+
+            // تطبيق الـ Swap إذا كان موجوداً
+            let finalUrl = serverData.url;
+            if (serverData.swap) {
+                finalUrl = applySwap(finalUrl, serverData.swap);
+            }
+
+            // إظهار مؤشر التحميل
+            loadingIndicator.style.display = 'block';
+            statusAlert.style.display = 'none';
+
+            console.log('Playing server:', {
+                name: serverData.name,
+                url: finalUrl,
+                agent: serverData.agent,
+                headers: serverData.headers
+            });
+
+            // تنظيف الـ timeout السابق
+            if (fallbackTimeout) {
+                clearTimeout(fallbackTimeout);
+            }
+
+            // تشغيل البث مع الهيدرز المخصصة
+            createHlsInstance(finalUrl, serverData.headers, serverData.agent);
+
+            // فحص تلقائي بعد 15 ثانية
+            fallbackTimeout = setTimeout(() => {
+                if (video.readyState < 2) { // لم يتم تحميل البيانات بعد
+                    console.log('Server timeout, trying next...');
+                    playNextServer();
+                }
+            }, 15000);
+        }
+
+        // دالة الانتقال للسيرفر التالي
+        function playNextServer() {
+            const nextIndex = currentServerIndex + 1;
+            if (nextIndex < rawServersData.length) {
+                playServer(nextIndex);
+            } else {
+                statusAlert.style.display = 'block';
+                statusAlert.textContent = 'جميع السيرفرات فشلت في التشغيل';
+                loadingIndicator.style.display = 'none';
+            }
+        }
+
+        // دالة تهيئة المشغل
         function initPlayer() {
             if (!rawServersData || rawServersData.length === 0) {
                 statusAlert.style.display = 'block';
@@ -620,73 +841,28 @@ app.get("/play/:id_live", async (req, res) => {
                 return;
             }
 
-            let validServerCount = 0;
-
-            rawServersData.forEach((item) => {
-                const rawUrl = item?.data?.url || item?.url || '';
-                if (!rawUrl) return;
-
-                let parsedConfig = {};
-                try {
-                    parsedConfig = typeof rawUrl === 'string' && rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-                } catch (e) {
-                    parsedConfig = { url: rawUrl };
-                }
-
-                if (!parsedConfig.url) return;
-
-                validServerCount++;
-                const serverName = item.name || item?.data?.name || ('سيرفر ' + validServerCount);
+            // إنشاء أزرار السيرفرات
+            rawServersData.forEach((serverItem, index) => {
+                const serverData = extractServerData(serverItem, index);
+                if (!serverData || !serverData.url) return;
 
                 const button = document.createElement('button');
                 button.className = 'btn-server';
-                button.textContent = serverName;
-                button.onclick = () => playSource(parsedConfig.url, button);
-
+                button.textContent = serverData.name;
+                button.onclick = () => playServer(index);
                 serversList.appendChild(button);
-
-                if (validServerCount === 1) {
-                    playSource(parsedConfig.url, button);
-                }
             });
 
-            if (validServerCount === 0) {
+            // تشغيل السيرفر الأول
+            if (serversList.children.length > 0) {
+                playServer(0);
+            } else {
                 statusAlert.style.display = 'block';
-                statusAlert.textContent = 'لا يوجد رابط بث صالح داخل السيرفرات المسترجعة.';
+                statusAlert.textContent = 'لا يوجد روابط بث صالحة';
             }
         }
 
-        function playSource(streamUrl, activeBtn) {
-            document.querySelectorAll('.btn-server').forEach(btn => btn.classList.remove('active'));
-            if (activeBtn) activeBtn.classList.add('active');
-            statusAlert.style.display = 'none';
-
-            if (hlsInstance) {
-                hlsInstance.destroy();
-            }
-
-            if (Hls.isSupported()) {
-                hlsInstance = new Hls({
-                    enableWorker: true,
-                    lowLatencyMode: true
-                });
-                hlsInstance.loadSource(streamUrl);
-                hlsInstance.attachMedia(video);
-                hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play().catch(() => {});
-                });
-                hlsInstance.on(Hls.Events.ERROR, (event, data) => {
-                    if (data.fatal) {
-                        statusAlert.style.display = 'block';
-                        statusAlert.textContent = 'تعذر تشغيل هذا السيرفر، جرب الانتقال لسيرفر آخر.';
-                    }
-                });
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = streamUrl;
-                video.play();
-            }
-        }
-
+        // بدء التشغيل
         initPlayer();
     </script>
 </body>
@@ -699,6 +875,12 @@ app.get("/play/:id_live", async (req, res) => {
         res.status(500).send("خطأ في تشغيل المسار: " + error.message);
     }
 });
+
+
+
+
+
+
 
 
 
