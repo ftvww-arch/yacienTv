@@ -539,62 +539,169 @@ app.get("/mach", async (req, res) => {
 app.get("/play/:id_live", async (req, res) => {
     try {
         const id_live = req.params.id_live;
-        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id_live" });
+        if (!id_live) return res.status(400).send("يرجى إرسال id_live في المسار");
 
-        const localBaseUrl = `http://localhost:${PORT}`; // استخدام المنفذ الحالي من إعداداتك
+        const localBaseUrl = `http://localhost:${PORT}`;
+        let servers = [];
 
-        // 1. محاولة جلب السيرفرات من مسار /stream
-        const streamResponse = await apiClient.get(`${localBaseUrl}/stream?id_live=${id_live}`);
-        const streamData = streamResponse.data;
+        // 1. استدعاء مسار /stream لجلب السيرفرات
+        try {
+            const streamRes = await apiClient.get(`${localBaseUrl}/stream?id_live=${id_live}`);
+            if (Array.isArray(streamRes.data) && streamRes.data.length > 0) {
+                servers = streamRes.data;
+            }
+        } catch (e) {}
 
-        // إذا كان الرد عبارة عن مصفوفة تحتوي على سيرفرات، نقوم بإرجاعها مباشرة
-        if (Array.isArray(streamData) && streamData.length > 0) {
-            return res.json(streamData);
+        // 2. إذا كانت النتيجة فارغة []، يتم الاستعانة بمرحلة الفحص لـ /last/
+        if (servers.length === 0) {
+            try {
+                const lastRes = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
+                const lastData = lastRes.data;
+
+                if (lastData?.data?.url) {
+                    servers = [lastData];
+                } else if (lastData?.streams && Array.isArray(lastData.streams)) {
+                    servers = lastData.streams.map((s, idx) => ({
+                        name: s.server_name || `سيرفر ${idx + 1}`,
+                        data: {
+                            url: JSON.stringify({
+                                url: s.url,
+                                agent: s.agent,
+                                headers: s.headers
+                            }),
+                            name: s.server_name || `سيرفر ${idx + 1}`
+                        }
+                    }));
+                }
+            } catch (e) {}
         }
 
-        // 2. إذا كانت المصفوفة فارغة []، نقوم باستدعاء مسار /last/
-        const lastResponse = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
-        const lastData = lastResponse.data;
+        // 3. بناء صفحة HTML للمشغل وتضمين بيانات السيرفرات بداخله
+        const html = `
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مشغل البث المباشر</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+        body { background: #0b0f19; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 15px; }
+        .player-card { width: 100%; max-width: 900px; background: #161f30; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.6); }
+        video { width: 100%; aspect-ratio: 16/9; background: #000; display: block; }
+        .controls-box { padding: 16px 20px; }
+        .title { font-size: 0.95rem; color: #38bdf8; margin-bottom: 12px; font-weight: 600; }
+        .servers-wrapper { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn-server { background: #233148; color: #cbd5e1; border: 1px solid #334155; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+        .btn-server:hover { background: #334155; color: #fff; }
+        .btn-server.active { background: #0284c7; border-color: #38bdf8; color: #fff; font-weight: bold; }
+        .status-alert { margin-top: 10px; color: #ef4444; font-size: 0.85rem; display: none; }
+    </style>
+</head>
+<body>
+    <div class="player-card">
+        <video id="video" controls autoplay playsinline></video>
+        <div class="controls-box">
+            <div class="title">سيرفرات البث المباشر المتاحة:</div>
+            <div id="serversList" class="servers-wrapper"></div>
+            <div id="statusAlert" class="status-alert"></div>
+        </div>
+    </div>
 
-        // التحقق من وجود روابط داخل مسار /last/ (يُرجع كائن يحتوي على streams)[cite: 1]
-        if (lastData && lastData.streams && lastData.streams.length > 0) {
-            // نأخذ السيرفر الأول من الرد
-            const firstStream = lastData.streams[0];
-            
-            // تجهيز محتوى الـ url كـ String (نص JSON) ليتطابق مع متطلبات المشغل الخاص بك
-            const urlStringData = JSON.stringify({
-                url: firstStream.url,
-                agent: firstStream.agent || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-                headers: firstStream.headers && Object.keys(firstStream.headers).length > 0 
-                    ? firstStream.headers 
-                    : { "User-Agent": firstStream.agent || "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" }
+    <script>
+        const rawServersData = ${JSON.stringify(servers)};
+        const video = document.getElementById('video');
+        const serversList = document.getElementById('serversList');
+        const statusAlert = document.getElementById('statusAlert');
+        let hlsInstance = null;
+
+        function initPlayer() {
+            if (!rawServersData || rawServersData.length === 0) {
+                statusAlert.style.display = 'block';
+                statusAlert.textContent = 'عذراً، لم يتم العثور على أي سيرفرات تشغيل لهذه القناة.';
+                return;
+            }
+
+            let validServerCount = 0;
+
+            rawServersData.forEach((item) => {
+                const rawUrl = item?.data?.url || item?.url || '';
+                if (!rawUrl) return;
+
+                let parsedConfig = {};
+                try {
+                    parsedConfig = typeof rawUrl === 'string' && rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
+                } catch (e) {
+                    parsedConfig = { url: rawUrl };
+                }
+
+                if (!parsedConfig.url) return;
+
+                validServerCount++;
+                const serverName = item.name || item?.data?.name || ('سيرفر ' + validServerCount);
+
+                const button = document.createElement('button');
+                button.className = 'btn-server';
+                button.textContent = serverName;
+                button.onclick = () => playSource(parsedConfig.url, button);
+
+                serversList.appendChild(button);
+
+                if (validServerCount === 1) {
+                    playSource(parsedConfig.url, button);
+                }
             });
 
-            // بناء الرد النهائي بالشكل المطلوب
-            const fallbackResponse = {
-                "result": 0,
-                "message": {
-                    "en": "operation succeeded",
-                    "ar": "تمت العملية بنجاح"
-                },
-                "data": {
-                    "url": urlStringData,
-                    "agent": "advanced"
-                }
-            };
-
-            return res.json(fallbackResponse);
+            if (validServerCount === 0) {
+                statusAlert.style.display = 'block';
+                statusAlert.textContent = 'لا يوجد رابط بث صالح داخل السيرفرات المسترجعة.';
+            }
         }
 
-        // 3. في حال لم يتم العثور على أي روابط في كلا المسارين، نرجع مصفوفة فارغة
-        return res.json([]); 
+        function playSource(streamUrl, activeBtn) {
+            document.querySelectorAll('.btn-server').forEach(btn => btn.classList.remove('active'));
+            if (activeBtn) activeBtn.classList.add('active');
+            statusAlert.style.display = 'none';
 
+            if (hlsInstance) {
+                hlsInstance.destroy();
+            }
+
+            if (Hls.isSupported()) {
+                hlsInstance = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true
+                });
+                hlsInstance.loadSource(streamUrl);
+                hlsInstance.attachMedia(video);
+                hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                    video.play().catch(() => {});
+                });
+                hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        statusAlert.style.display = 'block';
+                        statusAlert.textContent = 'تعذر تشغيل هذا السيرفر، جرب الانتقال لسيرفر آخر.';
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = streamUrl;
+                video.play();
+            }
+        }
+
+        initPlayer();
+    </script>
+</body>
+</html>
+        `;
+
+        res.setHeader("Content-Type", "text/html");
+        res.send(html);
     } catch (error) {
-        res.status(500).json({ error: true, message: error.message });
+        res.status(500).send("خطأ في تشغيل المسار: " + error.message);
     }
 });
-
-
 
 
 
