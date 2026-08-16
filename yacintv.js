@@ -11,48 +11,30 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ==========================================
-// 🆕 إعدادات الأداء والكاش
+// إعدادات الأداء والكاش
 // ==========================================
-// 1. إعداد اتصالات سريعة (Keep-Alive) لتخفيف الضغط وتقليل وقت الاستجابة
-const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 20, timeout: 60000, freeSocketTimeout: 30000 });
-const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100, maxFreeSockets: 20, timeout: 60000, freeSocketTimeout: 30000 });
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 100 });
 const apiClient = axios.create({ httpAgent, httpsAgent });
 
-// 2. الكاش: 5 دقائق (300 ثانية)
-const CACHE_TTL = 300;
-const appCache = new NodeCache({ stdTTL: CACHE_TTL, checkperiod: 120, useClones: false });
-
-// 3. نظام منع التدافع (Request Coalescing) - يمنع إرسال طلبات مكررة لنفس المفتاح
+const CACHE_TTL = 300; // 5 دقائق
+const appCache = new NodeCache({ stdTTL: CACHE_TTL, checkperiod: 60 });
 const pendingRequests = new Map();
 
-/**
- * دالة ذكية لإدارة الكاش ومنع تدافع الطلبات
- * - لو البيانات موجودة بالكاش: ترجع فوراً
- * - لو في طلب جاري لنفس المفتاح: تنتظر نفس الـ Promise
- * - لو مفيش: تعمل طلب جديد وتخزنه للجميع
- */
 async function fetchWithCacheAndLock(key, fetchFunction) {
-    // لو البيانات موجودة في الكاش، نرجعها فوراً
-    const cachedData = appCache.get(key);
-    if (cachedData !== undefined) {
-        return cachedData;
+    if (appCache.has(key)) {
+        return appCache.get(key);
     }
 
-    // لو في طلب جاري لنفس المفتاح، ننتظر نفس الطلب
     if (pendingRequests.has(key)) {
         return await pendingRequests.get(key);
     }
 
-    // إنشاء طلب جديد
     const requestPromise = (async () => {
         try {
             const data = await fetchFunction();
             appCache.set(key, data);
             return data;
-        } catch (error) {
-            // لو حصل خطأ، نحذف الطلب من الذاكرة عشان الطلبات الجاية تجرب من جديد
-            pendingRequests.delete(key);
-            throw error;
         } finally {
             pendingRequests.delete(key);
         }
@@ -598,6 +580,7 @@ const allTopics = [
     {"id_topic":"218","name_topic":"ليبيا","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_ly.png","code":""},
     {"id_topic":"252","name_topic":"الصومال","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_so.png","code":""}
 ];
+
 app.get("/get-all-topics", (req, res) => { res.json(allTopics); });
 
 app.listen(PORT, () => { console.log("🚀 Server running on port " + PORT); });
