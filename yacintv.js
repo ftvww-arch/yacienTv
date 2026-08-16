@@ -536,39 +536,114 @@ app.get("/mach", async (req, res) => {
 
 
 
+
+
+
+// ==========================================
+// 1. مسار البروكسي لحقن الهيدرز (User-Agent / Referer / Origin)
+// ==========================================
+app.get("/proxy-stream", async (req, res) => {
+    try {
+        const targetUrl = req.query.url;
+        if (!targetUrl) return res.status(400).send("رابط البث غير موجود");
+
+        // استخراج الهيدرز الممررة
+        let customHeaders = {};
+        if (req.query.headers) {
+            try {
+                customHeaders = JSON.parse(Buffer.from(req.query.headers, 'base64').toString('utf-8'));
+            } catch (e) {
+                try { customHeaders = JSON.parse(req.query.headers); } catch (err) {}
+            }
+        }
+
+        const requestHeaders = {
+            "User-Agent": DEFAULT_AGENT,
+            ...customHeaders
+        };
+
+        // حذف هيدرز قد تسبب تعارض
+        delete requestHeaders.host;
+        delete requestHeaders.connection;
+
+        // إرسال الطلب للسيرفر الأصلي بالهيدرز المحقونة
+        const response = await axios.get(targetUrl, {
+            headers: requestHeaders,
+            responseType: 'arraybuffer',
+            timeout: 15000,
+            validateStatus: () => true
+        });
+
+        const contentType = response.headers['content-type'] || '';
+        const isM3u8 = targetUrl.includes('.m3u8') || contentType.includes('mpegurl') || contentType.includes('m3u');
+
+        if (isM3u8) {
+            let playlistText = Buffer.from(response.data).toString('utf-8');
+            const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+            const encodedHeaders = Buffer.from(JSON.stringify(customHeaders)).toString('base64');
+
+            // إعادة كتابة روابط أجزاء البث داخل ملف m3u8 تمر عبر البروكسي أيضاً مع الحفاظ على الهيدرز
+            const lines = playlistText.split('\n');
+            const newLines = lines.map(line => {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#')) {
+                    if (trimmed.includes('URI="')) {
+                        return trimmed.replace(/URI="([^"]+)"/g, (match, uri) => {
+                            let fullUri = uri.startsWith('http') ? uri : new URL(uri, baseUrl).href;
+                            return `URI="/proxy-stream?url=${encodeURIComponent(fullUri)}&headers=${encodeURIComponent(encodedHeaders)}"`;
+                        });
+                    }
+                    return line;
+                }
+                let fullSegmentUrl = trimmed.startsWith('http') ? trimmed : new URL(trimmed, baseUrl).href;
+                return `/proxy-stream?url=${encodeURIComponent(fullSegmentUrl)}&headers=${encodeURIComponent(encodedHeaders)}`;
+            });
+
+            res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            return res.send(newLines.join('\n'));
+        } else {
+            // إرجاع أجزاء الفيديو (.ts) أو الصور
+            if (response.headers['content-type']) res.setHeader('Content-Type', response.headers['content-type']);
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            return res.send(Buffer.from(response.data));
+        }
+    } catch (error) {
+        res.status(500).send("خطأ في البروكسي: " + error.message);
+    }
+});
+
+// ==========================================
+// 2. مسار المشغل الرئيسي /play/:id_live
+// ==========================================
 app.get("/play/:id_live", async (req, res) => {
     try {
         const id_live = req.params.id_live;
         if (!id_live) return res.status(400).send("يرجى إرسال id_live في المسار");
 
         const localBaseUrl = `http://localhost:${PORT}`;
-        let servers = [];
+        let rawServers = [];
 
-        // 1. استدعاء مسار /stream لجلب السيرفرات
+        // 1. تجربة جلب السيرفرات من /stream
         try {
-            const streamRes = await apiClient.get(`${localBaseUrl}/stream?id_live=${id_live}`);
+            const streamRes = await axios.get(`${localBaseUrl}/stream?id_live=${id_live}`);
             if (Array.isArray(streamRes.data) && streamRes.data.length > 0) {
-                servers = streamRes.data;
+                rawServers = streamRes.data;
             }
         } catch (e) {}
 
-        // 2. إذا كانت النتيجة فارغة []، يتم الاستعانة بمرحلة الفحص لـ /last/
-        if (servers.length === 0) {
+        // 2. إذا كان الرد [] فارغاً، الاستعانة بـ /last
+        if (rawServers.length === 0) {
             try {
-                const lastRes = await apiClient.get(`${localBaseUrl}/last/${id_live}`);
+                const lastRes = await axios.get(`${localBaseUrl}/last/${id_live}`);
                 const lastData = lastRes.data;
-
                 if (lastData?.data?.url) {
-                    servers = [lastData];
+                    rawServers = [lastData];
                 } else if (lastData?.streams && Array.isArray(lastData.streams)) {
-                    servers = lastData.streams.map((s, idx) => ({
+                    rawServers = lastData.streams.map((s, idx) => ({
                         name: s.server_name || `سيرفر ${idx + 1}`,
                         data: {
-                            url: JSON.stringify({
-                                url: s.url,
-                                agent: s.agent,
-                                headers: s.headers
-                            }),
+                            url: JSON.stringify({ url: s.url, agent: s.agent, headers: s.headers }),
                             name: s.server_name || `سيرفر ${idx + 1}`
                         }
                     }));
@@ -576,7 +651,34 @@ app.get("/play/:id_live", async (req, res) => {
             } catch (e) {}
         }
 
-        // 3. بناء صفحة HTML للمشغل وتضمين بيانات السيرفرات بداخله
+        // 3. تجهيز قائمة السيرفرات وتحويل روابطها عبر البروكسي المحكم
+        const processedServers = rawServers.map((item, index) => {
+            const rawUrl = item?.data?.url || item?.url || '';
+            let parsedObj = {};
+            try {
+                parsedObj = typeof rawUrl === 'string' && rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
+            } catch (e) {
+                parsedObj = { url: rawUrl };
+            }
+
+            const streamUrl = parsedObj.url || '';
+            const headers = parsedObj.headers || {};
+            if (parsedObj.agent && !headers['User-Agent']) {
+                headers['User-Agent'] = parsedObj.agent;
+            }
+
+            // تشفير الهيدرز لإرسالها للبروكسي
+            const encodedHeaders = Buffer.from(JSON.stringify(headers)).toString('base64');
+            const proxiedUrl = streamUrl ? `/proxy-stream?url=${encodeURIComponent(streamUrl)}&headers=${encodeURIComponent(encodedHeaders)}` : '';
+
+            return {
+                name: item.name || item?.data?.name || `سيرفر ${index + 1}`,
+                proxiedUrl: proxiedUrl,
+                originalUrl: streamUrl
+            };
+        }).filter(s => s.proxiedUrl !== '');
+
+        // 4. بناء مشغل HTML مع دعم HLS
         const html = `
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -603,63 +705,41 @@ app.get("/play/:id_live", async (req, res) => {
     <div class="player-card">
         <video id="video" controls autoplay playsinline></video>
         <div class="controls-box">
-            <div class="title">سيرفرات البث المباشر المتاحة:</div>
+            <div class="title">اختر سيرفر البث المباشر:</div>
             <div id="serversList" class="servers-wrapper"></div>
             <div id="statusAlert" class="status-alert"></div>
         </div>
     </div>
 
     <script>
-        const rawServersData = ${JSON.stringify(servers)};
+        const servers = ${JSON.stringify(processedServers)};
         const video = document.getElementById('video');
         const serversList = document.getElementById('serversList');
         const statusAlert = document.getElementById('statusAlert');
         let hlsInstance = null;
 
         function initPlayer() {
-            if (!rawServersData || rawServersData.length === 0) {
+            if (!servers || servers.length === 0) {
                 statusAlert.style.display = 'block';
-                statusAlert.textContent = 'عذراً، لم يتم العثور على أي سيرفرات تشغيل لهذه القناة.';
+                statusAlert.textContent = 'عذراً، لا توجد سيرفرات متاحة حالياً لهذه القناة.';
                 return;
             }
 
-            let validServerCount = 0;
-
-            rawServersData.forEach((item) => {
-                const rawUrl = item?.data?.url || item?.url || '';
-                if (!rawUrl) return;
-
-                let parsedConfig = {};
-                try {
-                    parsedConfig = typeof rawUrl === 'string' && rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-                } catch (e) {
-                    parsedConfig = { url: rawUrl };
-                }
-
-                if (!parsedConfig.url) return;
-
-                validServerCount++;
-                const serverName = item.name || item?.data?.name || ('سيرفر ' + validServerCount);
-
+            servers.forEach((server, index) => {
                 const button = document.createElement('button');
                 button.className = 'btn-server';
-                button.textContent = serverName;
-                button.onclick = () => playSource(parsedConfig.url, button);
+                button.textContent = server.name;
+                button.onclick = () => playStream(server.proxiedUrl, button);
 
                 serversList.appendChild(button);
 
-                if (validServerCount === 1) {
-                    playSource(parsedConfig.url, button);
+                if (index === 0) {
+                    playStream(server.proxiedUrl, button);
                 }
             });
-
-            if (validServerCount === 0) {
-                statusAlert.style.display = 'block';
-                statusAlert.textContent = 'لا يوجد رابط بث صالح داخل السيرفرات المسترجعة.';
-            }
         }
 
-        function playSource(streamUrl, activeBtn) {
+        function playStream(proxiedUrl, activeBtn) {
             document.querySelectorAll('.btn-server').forEach(btn => btn.classList.remove('active'));
             if (activeBtn) activeBtn.classList.add('active');
             statusAlert.style.display = 'none';
@@ -673,7 +753,7 @@ app.get("/play/:id_live", async (req, res) => {
                     enableWorker: true,
                     lowLatencyMode: true
                 });
-                hlsInstance.loadSource(streamUrl);
+                hlsInstance.loadSource(proxiedUrl);
                 hlsInstance.attachMedia(video);
                 hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
                     video.play().catch(() => {});
@@ -681,11 +761,11 @@ app.get("/play/:id_live", async (req, res) => {
                 hlsInstance.on(Hls.Events.ERROR, (event, data) => {
                     if (data.fatal) {
                         statusAlert.style.display = 'block';
-                        statusAlert.textContent = 'تعذر تشغيل هذا السيرفر، جرب الانتقال لسيرفر آخر.';
+                        statusAlert.textContent = 'حدث خطأ في تشغيل السيرفر الحالي، جرب سيرفر آخر.';
                     }
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = streamUrl;
+                video.src = proxiedUrl;
                 video.play();
             }
         }
@@ -702,9 +782,6 @@ app.get("/play/:id_live", async (req, res) => {
         res.status(500).send("خطأ في تشغيل المسار: " + error.message);
     }
 });
-
-
-
 
 
 
