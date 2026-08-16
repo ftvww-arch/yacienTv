@@ -532,57 +532,63 @@ app.get("/mach", async (req, res) => {
 
 
 
+
+
 // ==========================================
-// 🆕 مسار تشغيل البث وحقن الهيدرز (Proxy & Swap)
+// 🆕 مسار تشغيل البث الديناميكي عبر المعرف (Proxy & Swap)
 // ==========================================
-app.post('/stream-proxy', async (req, res) => {
-    // استقبال البيانات 
-    const { Data, Url } = req.body; 
+app.post('/stream-proxy/:id', async (req, res) => {
+    const channelId = req.params.id; // مثل: live_tv_marrocow1
+    let { Data, Url } = req.body; 
     let streamsArray = [];
-    let channelName = "";
-    let isNewFormat = false;
 
     try {
+        // إذا لم يتم إرسال بيانات أو رابط مباشرة في الـ Body، نقوم بجلبها تلقائياً باستخدام معرف القناة
+        if ((!Data || Data.trim() === "") && (!Url || Url.trim() === "")) {
+            const localBaseUrl = `http://localhost:${PORT}`;
+            try {
+                // محاولة جلب بيانات السيرفرات عبر دالة الـ last الموجودة في ملفك
+                const streamResponse = await apiClient.get(`${localBaseUrl}/last/${channelId}`);
+                if (streamResponse.data && streamResponse.data.streams) {
+                    streamsArray = streamResponse.data.streams.map(s => ({
+                        quality: s.server_name || "سيرفر",
+                        url: s.url || "",
+                        agent: s.agent || DEFAULT_AGENT,
+                        headers: s.headers || {},
+                        acceptSSL: "1"
+                    }));
+                }
+            } catch (err) {
+                console.error("خطأ في جلب بيانات القناة تلقائياً:", err.message);
+            }
+        }
+
+        // المعالجة العادية في حال تم ارسال Data أو Url في الـ Body
         if (Data && Data.trim() !== "") {
             let trimmedData = Data.trim();
-
             if (trimmedData.startsWith("{")) {
                 let root = JSON.parse(trimmedData);
-                
                 if (root.streams && root.streams.length > 0) {
-                    isNewFormat = true;
                     streamsArray = root.streams;
-                    channelName = root.name || "";
-                } else if (root.channel) {
-                    channelName = root.channel.name || "";
-                    streamsArray = root.sources || [];
                 } else if (root.data && root.data.url) {
                     streamsArray.push({
                         quality: "سيرفر رئيسي",
-                        server_name: root.name || "سيرفر رئيسي",
                         url: root.data.url.trim(),
                         agent: root.data.agent || ""
                     });
-                    isNewFormat = true;
                 }
-            } 
-            else if (trimmedData.startsWith("[")) {
+            } else if (trimmedData.startsWith("[")) {
                 let rootArray = JSON.parse(trimmedData);
                 rootArray.forEach((item, index) => {
                     if (item.data && item.data.url) {
-                        let sName = item.name || `سيرفر ${index + 1}`;
                         streamsArray.push({
-                            quality: sName,
-                            server_name: sName,
+                            quality: item.name || `سيرفر ${index + 1}`,
                             url: item.data.url.trim(),
                             agent: item.data.agent || ""
                         });
                     }
                 });
-                isNewFormat = true;
-                if (streamsArray.length > 0) channelName = streamsArray[0].server_name;
-            } 
-            else if (trimmedData.startsWith("http")) {
+            } else if (trimmedData.startsWith("http")) {
                 streamsArray.push({ quality: "سيرفر رئيسي", url: trimmedData });
             }
         } else if (Url && Url.trim() !== "") {
@@ -590,26 +596,23 @@ app.post('/stream-proxy', async (req, res) => {
         }
 
         if (streamsArray.length === 0) {
-            return res.status(404).json({ error: "لا توجد سيرفرات متاحة للبث" });
+            return res.status(404).json({ error: "لا توجد سيرفرات متاحة لهذه القناة" });
         }
 
         let selectedStream = streamsArray[0];
         let rawUrl = selectedStream.url;
-        
         let videoUrl = rawUrl;
         let headers = {
-            // استخدام DEFAULT_AGENT المعرف مسبقاً في ملفك
             "User-Agent": selectedStream.agent || DEFAULT_AGENT 
         };
         let swapKey = "";
         let swapValue = "";
-        let acceptSSL = selectedStream.acceptSSL === "1";
+        let acceptSSL = selectedStream.acceptSSL === "1" || true;
 
         if (rawUrl.startsWith("{") && rawUrl.endsWith("}")) {
             let nested = JSON.parse(rawUrl);
             videoUrl = nested.url;
             if (nested.agent) headers["User-Agent"] = nested.agent;
-            
             if (nested.swap) {
                 swapKey = Object.keys(nested.swap)[0];
                 swapValue = nested.swap[swapKey];
@@ -632,23 +635,21 @@ app.post('/stream-proxy', async (req, res) => {
             url: videoUrl,
             headers: headers,
             responseType: 'stream',
-            timeout: 15000 // مهلة للطلب لتجنب تعليق السيرفر
+            timeout: 15000
         };
 
         if (acceptSSL) {
             axiosConfig.httpsAgent = new https.Agent({ rejectUnauthorized: false });
         }
 
-        // إرسال الطلب لقلب البث
         const response = await axios(axiosConfig);
-
         const contentType = response.headers['content-type'] || 'application/x-mpegURL';
+        
         res.set({
             'Content-Type': contentType,
             'Access-Control-Allow-Origin': '*'
         });
 
-        // تطبيق الاستبدال (Swap) طيراناً إذا كان الملف النصي من نوع M3U8 أو DASH
         if (swapKey && (contentType.includes('mpegurl') || contentType.includes('dash+xml'))) {
             let chunks = [];
             response.data.on('data', chunk => chunks.push(chunk));
@@ -658,7 +659,6 @@ app.post('/stream-proxy', async (req, res) => {
                 res.send(body);
             });
         } else {
-            // تمرير البث المباشر كما هو
             response.data.pipe(res);
         }
 
@@ -667,8 +667,6 @@ app.post('/stream-proxy', async (req, res) => {
         res.status(500).json({ error: "فشل في تشغيل البث", details: error.message });
     }
 });
-
-
 
 
 
