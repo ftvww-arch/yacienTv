@@ -9,7 +9,26 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 
 // ==========================================
-// 1. مسار البروكسي: القلب النابض الذي يحقن الهيدرز ويتخطى SSL
+// 1. بروكسي الـ API: لجلب بيانات السيرفرات بدون مشاكل CORS
+// ==========================================
+app.get("/api/stream", async (req, res) => {
+    try {
+        const id_live = req.query.id_live;
+        if (!id_live) return res.status(400).json({ error: "id_live is required" });
+
+        // نطلب البيانات من الـ API الأصلي عبر السيرفر (Node.js لا يتأثر بـ CORS)
+        const response = await axios.get(`https://yacintv-api.onrender.com/stream?id_live=${id_live}`);
+        
+        // نرسل البيانات كـ JSON للمتصفح
+        res.json(response.data);
+    } catch (error) {
+        console.error("API Fetch Error:", error.message);
+        res.status(500).json({ error: "فشل الاتصال بالخادم الخارجي للـ API" });
+    }
+});
+
+// ==========================================
+// 2. بروكسي الفيديو: القلب النابض الذي يحقن الهيدرز ويتخطى SSL
 // ==========================================
 app.get("/proxy", async (req, res) => {
     try {
@@ -44,7 +63,7 @@ app.get("/proxy", async (req, res) => {
 });
 
 // ==========================================
-// 2. واجهة المشغل الذكي (HTML + JS + CSS مدمجة في مسار واحد)
+// 3. واجهة المشغل الذكي (HTML + JS + CSS)
 // ==========================================
 app.get("/play", (req, res) => {
     const htmlContent = `
@@ -57,7 +76,7 @@ app.get("/play", (req, res) => {
         <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
         <style>
             body {
-                background-color: #0b1a2a; /* Dark Sky Blue */
+                background-color: #0b1a2a; 
                 color: #ffffff;
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 margin: 0;
@@ -74,7 +93,7 @@ app.get("/play", (req, res) => {
                 border-radius: 12px;
                 padding: 20px;
                 box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-                border: 2px solid #ffcc00; /* Yellow Accent */
+                border: 2px solid #ffcc00; 
             }
             #title {
                 font-size: 22px;
@@ -132,15 +151,12 @@ app.get("/play", (req, res) => {
             const urlParams = new URLSearchParams(window.location.search);
             const channelId = urlParams.get('id_live') || 'live_tv_beinsport1';
 
-            // ----------------------------------------------------
             // نظام اعتراض الطلبات (Loader) لتطبيق الـ Swap والبروكسي
-            // ----------------------------------------------------
             class ProxyLoader extends Hls.DefaultConfig.loader {
                 constructor(config) { super(config); }
                 load(context, config, callbacks) {
                     let targetUrl = context.url;
                     
-                    // تطبيق الـ Swap
                     if (currentStreamConfig && currentStreamConfig.swap) {
                         for (let key in currentStreamConfig.swap) {
                             if (targetUrl.includes(key)) {
@@ -149,7 +165,6 @@ app.get("/play", (req, res) => {
                         }
                     }
 
-                    // توجيه الطلب للبروكسي الخاص بنا للحقن
                     if (currentStreamConfig) {
                         const headersStr = encodeURIComponent(JSON.stringify(currentStreamConfig.headers || {}));
                         context.url = \`/proxy?url=\${encodeURIComponent(targetUrl)}&headers=\${headersStr}&acceptSSL=\${currentStreamConfig.acceptSSL}\`;
@@ -159,14 +174,23 @@ app.get("/play", (req, res) => {
                 }
             }
 
-            // ----------------------------------------------------
-            // استخراج وتفكيك بيانات API
-            // ----------------------------------------------------
+            // استخراج وتفكيك بيانات API عبر السيرفر الداخلي
             async function fetchStreamData() {
                 try {
-                    const response = await fetch(\`https://yacintv-api.onrender.com/stream?id_live=\${channelId}\`);
+                    // التغيير هنا: نطلب من الخادم المحلي بدلاً من الخارجي مباشرة
+                    const response = await fetch(\`/api/stream?id_live=\${channelId}\`);
+                    
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+
                     const data = await response.json();
                     streamsData = [];
+
+                    // التأكد من أن البيانات مصفوفة
+                    if (!Array.isArray(data)) {
+                        throw new Error('API لم يرجع مصفوفة بيانات صحيحة');
+                    }
 
                     data.forEach((item, index) => {
                         let streamObj = { name: item.name || \`سيرفر \${index + 1}\` };
@@ -182,7 +206,7 @@ app.get("/play", (req, res) => {
                                 if (parsed.agent && !streamObj.headers['User-Agent']) {
                                     streamObj.headers['User-Agent'] = parsed.agent;
                                 }
-                            } catch (e) { console.error(e); }
+                            } catch (e) { console.error("خطأ في فك تشفير JSON:", e); }
                         } else if (rawUrl) {
                             streamObj.url = rawUrl;
                             streamObj.headers = {};
@@ -200,7 +224,8 @@ app.get("/play", (req, res) => {
                     playStream(0);
 
                 } catch (error) {
-                    titleElement.innerText = "فشل جلب أو فك تشفير البث";
+                    console.error("مشكلة مفصلة:", error);
+                    titleElement.innerText = "فشل جلب أو فك تشفير البث (راجع الـ Console)";
                 }
             }
 
@@ -218,9 +243,6 @@ app.get("/play", (req, res) => {
                 playStream(serverSelect.value);
             }
 
-            // ----------------------------------------------------
-            // تشغيل البث
-            // ----------------------------------------------------
             function playStream(index) {
                 if (hls) hls.destroy();
 
@@ -237,7 +259,6 @@ app.get("/play", (req, res) => {
                     hls.attachMedia(video);
                     hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
                     
-                    // Fallback ذكي للانتقال للسيرفر التالي في حال الفشل
                     hls.on(Hls.Events.ERROR, (event, data) => {
                         if (data.fatal) {
                             let nextIndex = parseInt(index) + 1;
@@ -250,7 +271,6 @@ app.get("/play", (req, res) => {
                         }
                     });
                 } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                    // دعم متصفحات آبل التي لا تدعم Hls.js
                     const headersStr = encodeURIComponent(JSON.stringify(currentStreamConfig.headers || {}));
                     video.src = \`/proxy?url=\${encodeURIComponent(videoUrl)}&headers=\${headersStr}&acceptSSL=\${currentStreamConfig.acceptSSL}\`;
                     video.play();
@@ -266,7 +286,6 @@ app.get("/play", (req, res) => {
     res.send(htmlContent);
 });
 
-// تشغيل الخادم
 app.listen(PORT, () => {
     console.log("🚀 Server is running!");
     console.log(`👉 Open in browser: http://localhost:${PORT}/play?id_live=live_tv_beinsport1`);
