@@ -1,877 +1,475 @@
-const express = require("express");
-const axios = require("axios");
-const CryptoJS = require("crypto-js");
-const NodeCache = require("node-cache");
-const https = require("https");
+const express = require('express');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// ==========================================
-// 🆕 إعداد نظام الكاش الذكي (Request Coalescing)
-// ==========================================
-// توحيد المدة الافتراضية للكاش لتكون 300 ثانية (5 دقائق)، وتنظيف الكاش المنتهي كل 60 ثانية
-const appCache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
-// خريطة لحفظ الطلبات قيد التنفيذ لمنع التكرار (Thundering herd prevention)
-const activeRequests = new Map();
+// ---------------------------------------------------------
+// الهياكل الأساسية والـ Headers والتعابير المنتظمة (Regex)
+// ---------------------------------------------------------
+const emptyResponse = {
+    title: "", link: "", image: "", quality: "", category: "", views: "", imdb: "", type: ""
+};
 
-/**
- * دالة مساعدة لجلب البيانات من الكاش أو من السيرفر بطلب واحد فقط للكل
- */
-async function fetchWithCache(cacheKey, fetchFunction) {
-    // 1. إذا كانت البيانات موجودة في الكاش، أرجعها مباشرة
-    if (appCache.has(cacheKey)) {
-        return appCache.get(cacheKey);
-    }
-
-    // 2. إذا كان هناك طلب حالي يتم تنفيذه لنفس المفتاح، انتظر نتيجته (الـ 49 طلب سينتظرون هنا)
-    if (activeRequests.has(cacheKey)) {
-        return await activeRequests.get(cacheKey);
-    }
-
-    // 3. إذا لم يكن هناك طلب قيد التنفيذ، أنشئ طلباً جديداً (الطلب الأول فقط سينفذ هذا الجزء)
-    const requestPromise = (async () => {
-        try {
-            const data = await fetchFunction();
-            appCache.set(cacheKey, data); // الحفظ في الكاش لمدة 5 دقائق افتراضياً
-            return data;
-        } catch (error) {
-            throw error;
-        } finally {
-            // تنظيف الطلب من الخريطة بعد الانتهاء (سواء نجح أو فشل)
-            activeRequests.delete(cacheKey);
-        }
-    })();
-
-    // حفظ الطلب في الخريطة ليتمكن الآخرون من انتظاره
-    activeRequests.set(cacheKey, requestPromise);
-    
-    return await requestPromise;
-}
-
-const KEY = CryptoJS.enc.Utf8.parse("0123456789abcdef");
-const IV = CryptoJS.enc.Utf8.parse("fedcba9876543210");
-
-function encryptAES(data) {
-    const encrypted = CryptoJS.AES.encrypt(data, KEY, {
-        iv: IV,
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7
-    });
-    return encrypted.toString() + ":" + CryptoJS.enc.Base64.stringify(IV);
-}
-
-function decryptAES(encryptedText) {
-    encryptedText = encryptedText.trim();
-    const lastColon = encryptedText.lastIndexOf(":");
-    const encryptedData = encryptedText.substring(0, lastColon);
-    const ivBase64 = encryptedText.substring(lastColon + 1);
-    const decrypted = CryptoJS.AES.decrypt(encryptedData, KEY, {
-        iv: CryptoJS.enc.Base64.parse(ivBase64),
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7
-    });
-    return decrypted.toString(CryptoJS.enc.Utf8);
-}
-
-function convertFakeUrlToRealUrl(fakeUrl, channelId) {
-    const match = fakeUrl.match(/\.LS\.V2(.+?)\/s$/);
-    if (!match) return fakeUrl;
-    const extractedPart = match[1];
-    let realUrl = "";
-    if (extractedPart.includes("LOAD_BALANCER")) {
-        const cleanId = extractedPart.replace("LOAD_BALANCER", "");
-        realUrl = `{"url":"http://.LS.V2LOAD_BALANCER${cleanId}/s","data":"","acceptSSL":"1","iframe":"","headers":{}}`;
-    } else if (extractedPart.includes("custom_handler")) {
-        realUrl = `{"url":"${fakeUrl}","data":"","acceptSSL":"1","iframe":"","headers":{}}`;
-    } else if (extractedPart.includes("daddy_")) {
-        const daddyId = extractedPart.replace("daddy_", "");
-        realUrl = `{"url":"https://hamis.romponalis.st/premiumtv/daddy4.php?id=${daddyId}","data":"","acceptSSL":"1","iframe":"https://daddylive.mov/embed/embed.php?id=${daddyId}&player=1&source=tv.json","headers":{"Referer":"https://dlhd.pk/","Origin":"https://dlhd.pk","Accept":"*/*","Sec-Fetch-Dest":"empty","Sec-Fetch-Mode":"cors","Sec-Fetch-Site":"cross-site"}}`;
-    } else {
-        realUrl = `{"url":"${fakeUrl}","data":"","acceptSSL":"1","iframe":"","headers":{}}`;
-    }
-    return realUrl;
-}
-
-const DEFAULT_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
-const DEFAULT_HEADERS = { "User-Agent": DEFAULT_AGENT };
-
-function parseDataUrl(dataUrl, fallbackAgent) {
+const getHeaders = (targetUrl) => {
     try {
-        const obj = JSON.parse(dataUrl);
-        const streamUrl = obj.url || "";
-        const agent = obj.agent || fallbackAgent || DEFAULT_AGENT;
-        const mediatype = obj.mediatype || (streamUrl.includes(".mpd") ? "dash" : streamUrl.includes(".m3u8") ? "hls" : null);
-        
-        const headers = obj.headers || {};
-        if (!headers["User-Agent"] && !headers["user-agent"]) {
-            headers["User-Agent"] = agent;
-        }
-        
+        const urlObj = new URL(targetUrl);
         return {
-            url: streamUrl, agent: agent, headers: headers, drm: obj.drm || null,
-            mediatype: mediatype, iframe: obj.iframe || null, acceptSSL: obj.acceptSSL || null
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+            "Connection": "keep-alive",
+            "Referer": urlObj.origin + "/", 
+            "Origin": urlObj.origin,
+            "Referrer-Policy": "strict-origin-when-cross-origin"
         };
     } catch (e) {
-        return {
-            url: dataUrl, agent: fallbackAgent || DEFAULT_AGENT, headers: { ...DEFAULT_HEADERS },
-            drm: null, mediatype: null, iframe: null, acceptSSL: null
-        };
+        return {};
     }
-}
+};
 
-function createServerObject(serverName, url, agent, headers, drm, mediatype) {
-    return {
-        server_name: serverName, url: url || "", agent: agent || DEFAULT_AGENT,
-        drm: drm || null, headers: (headers && Object.keys(headers).length > 0) ? headers : { ...DEFAULT_HEADERS }, mediatype: mediatype || null
-    };
-}
-
-async function fetchIntermediateUrl(url, headers = {}, agent = null) {
+const fetchHtmlContent = async (url) => {
     try {
-        const requestHeaders = {
-            "User-Agent": agent || DEFAULT_AGENT, "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9", "Connection": "keep-alive", ...headers
-        };
+        const response = await fetch(url, { headers: getHeaders(url) });
+        if (!response.ok) return null;
+        return await response.text();
+    } catch (error) {
+        return null;
+    }
+};
 
-        const response = await axios.get(url, { headers: requestHeaders, timeout: 15000, maxRedirects: 5, validateStatus: s => s < 500 });
-        const html = typeof response.data === "string" ? response.data : JSON.stringify(response.data);
-        
-        let streamUrl = null;
-        const m3u8Match = html.match(/(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/i);
-        if (m3u8Match) streamUrl = m3u8Match[1];
-        if (!streamUrl) {
-            const mpdMatch = html.match(/(https?:\/\/[^\s"'<>]+\.mpd[^\s"'<>]*)/i);
-            if (mpdMatch) streamUrl = mpdMatch[1];
-        }
-        if (!streamUrl) {
-            const srcMatch = html.match(/source\s+src=["']([^"']+)["']/i) || html.match(/iframe\s+src=["']([^"']+)["']/i);
-            if (srcMatch) streamUrl = srcMatch[1];
-        }
-        if (!streamUrl) {
-            const b64 = html.match(/atob\s*\(\s*['"]([A-Za-z0-9+/=]+)['"]\s*\)/);
-            if (b64) {
-                try { const d = Buffer.from(b64[1], 'base64').toString('utf-8'); if (d.startsWith("http")) streamUrl = d; } catch(e) {}
+const pCleanup = /&#8211;|–|&#\d+;|&amp;/g;
+const pHtmlEntity = /&[^\s;]+;/g;
+
+
+// ---------------------------------------------------------
+// 1. دوال استخراج بيانات الصفحة الرئيسية (الأحدث والأشهر - عام)
+// ---------------------------------------------------------
+const extractHomePageData = (html) => {
+    const topList = [];
+    const newList = [];
+    const topLinks = new Set();
+
+    const sections = html.split(/<section|<div class="container">|<div class="headWfilter">/i);
+
+    for (let i = 1; i < sections.length; i++) {
+        let secHTML = sections[i];
+        let secTitle = "";
+
+        let mt = secHTML.match(/class="[^"]*h4[^"]*">\s*([^<]+?)\s*</i) || 
+                 secHTML.match(/class="[^"]*h3[^"]*">\s*([^<]+?)\s*</i) || 
+                 secHTML.match(/<div class="subHead">[\s\S]*?<div class="h4">\s*([^<]+?)\s*</i);
+        if (mt) secTitle = mt[1].trim();
+
+        if (!secTitle) continue;
+
+        const isTopSection = secTitle.includes("الاكثر مشاهدة") || secTitle.includes("الأكثر مشاهدة");
+        const isNewSection = secTitle.includes("احدث") || secTitle.includes("أحدث") || 
+                             secTitle.includes("جميع") || secTitle.includes("المسلسلات") ||
+                             secTitle.includes("الافلام") || secTitle.includes("الأفلام") ||
+                             secTitle.includes("البرامج") || secTitle.includes("الأنمي") ||
+                             secTitle.includes("الانمي");
+
+        if (isTopSection || isNewSection) {
+            let type = "";
+            if (secTitle.includes("برنامج") || secTitle.includes("البرامج")) type = "برنامج";
+            else if (secTitle.includes("أنمي") || secTitle.includes("انمي") || secTitle.includes("الأنمي") || secTitle.includes("الانمي")) type = "انمي";
+            else if (secTitle.includes("مسلسل") || secTitle.includes("المسلسلات")) type = "مسلسل";
+            else if (secTitle.includes("فيلم") || secTitle.includes("افلام") || secTitle.includes("أفلام")) type = "فيلم";
+            else if (secTitle.includes("اسيوي") || secTitle.includes("أسيوي") || secTitle.includes("الآسيوية")) type = "اسيوي";
+
+            const itemRegex = /<div class="postDiv\s*">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let mItem;
+            
+            while ((mItem = itemRegex.exec(secHTML)) !== null) {
+                let fullItem = mItem[0];
+                let link = fullItem.match(/<a href="([^"]+)"/i)?.[1] || "";
+                
+                if (isTopSection && topLinks.has(link)) continue;
+                if (isTopSection) topLinks.add(link);
+
+                let title = fullItem.match(/alt="([^"]+)"/i)?.[1] || "";
+                if (title) title = title.replace(pCleanup, "").replace(pHtmlEntity, "").trim();
+
+                let img = fullItem.match(/data-src="([^"]+)"/i)?.[1] || "";
+                
+                let quality = "", episodes = "";
+                let qMatches = [...fullItem.matchAll(/class="quality">\s*([^<]+?)\s*</gi)];
+                if (qMatches.length > 0) quality = qMatches[0][1].trim();
+                if (qMatches.length > 1 && qMatches[1][1].includes("حلقة")) episodes = qMatches[1][1].trim();
+
+                let category = fullItem.match(/class="cat">([^<]+)</i)?.[1]?.trim() || "";
+                let views = fullItem.match(/class="pViews"[^>]*>[\s\S]*?<\s*\/\s*i\s*>\s*([^<]+?)\s*</i)?.[1]?.trim() || "";
+                
+                let imdb = fullItem.match(/class="pImdb"[^>]*>[\s\S]*?<\s*\/\s*i\s*>\s*([^<]+?)\s*</i)?.[1]?.trim() || 
+                           fullItem.match(/<span>\s*<i\s+class="fa fa-star"><\/i>\s*([^<]+?)\s*</i)?.[1]?.trim() || "";
+
+                const jsonItem = { title, link, image: img, quality, category, views, imdb, type };
+                if (episodes) jsonItem.episodes = episodes;
+
+                if (isTopSection) {
+                    topList.push(jsonItem);
+                    if (topList.length >= 10) break;
+                } else {
+                    newList.push(jsonItem);
+                }
             }
         }
+    }
+    return { topList, newList };
+};
 
-        return streamUrl ? { success: true, url: streamUrl, agent: agent || DEFAULT_AGENT, headers: headers || {}, mediatype: streamUrl.includes(".mpd") ? "dash" : "hls" } : { success: false };
-    } catch (e) { return { success: false, error: e.message }; }
-}
 
-async function sendRequest(channelId, urlData, agent, encryptedRawData = "", endpoint = "getLiveByRedirect") {
-    const postData = {
-        "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-        "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-        "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-        "isPremium": false, "isCoupon_active": false, "hideAds": false,
-        "appCount": "{\"adsFailed\":73,\"adsLoaded\":56,\"adsShowed\":17,\"runCount\":8}",
-        "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-        "id": channelId, "url": urlData, "agent": agent, "raw_data": encryptedRawData
+// ---------------------------------------------------------
+// 2. دالة استخراج أقسام الصفحة الرئيسية (محددة بـ 6 عناصر)
+// ---------------------------------------------------------
+const extractHomeCategories = (html) => {
+    const result = {
+        movies: [],
+        asian: [],
+        anime: [],
+        series: []
     };
 
-    const encryptedBody = encryptAES(JSON.stringify(postData));
+    const sections = html.split(/<section/i);
 
-    const response = await axios.post(`http://redirect.1spbgmu.com/redirect/${endpoint}`, encryptedBody, {
-        headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "redirect.1spbgmu.com", "Connection": "Keep-Alive", "Accept-Encoding": "gzip" },
-        timeout: 15000, responseType: "arraybuffer"
+    for (let i = 1; i < sections.length; i++) {
+        let secHTML = sections[i];
+        let secTitle = "";
+        
+        let mt = secHTML.match(/class="[^"]*h3[^"]*">\s*([^<]+?)\s*</i);
+        if (mt) secTitle = mt[1].trim();
+
+        if (!secTitle) continue;
+
+        // --- 1. الأفلام ---
+        if (secTitle.includes("الأفلام")) {
+            const itemRegex = /<div class="blockMovie">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let mItem;
+            while ((mItem = itemRegex.exec(secHTML)) !== null && result.movies.length < 6) {
+                const item = mItem[1];
+                const link = item.match(/href="([^"]+)"/i)?.[1] || "";
+                let title = item.match(/alt="([^"]+)"/i)?.[1] || "";
+                title = title.replace(pCleanup, "").replace(pHtmlEntity, "").trim();
+                
+                const image = item.match(/data-src="([^"]+)"/i)?.[1] || "";
+                const quality = item.match(/quality">([^<]+)</i)?.[1]?.trim() || "";
+                const views = item.match(/bviews">[\s\S]*?<\s*\/\s*i\s*>\s*([^<]+)</i)?.[1]?.trim() || "";
+                const category = item.match(/bCat">([^<]+)</i)?.[1]?.trim() || "";
+                const imdb = item.match(/bimdb">[\s\S]*?<\s*\/\s*i\s*>\s*([^<]+)</i)?.[1]?.trim() || "";
+
+                result.movies.push({ title, link, image, quality, views, category, imdb });
+            }
+        }
+        // --- 2. الأسيوية ---
+        else if (secTitle.includes("الأسيوية")) {
+            const itemRegex = /<div class="blockMovie">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let mItem;
+            while ((mItem = itemRegex.exec(secHTML)) !== null && result.asian.length < 6) {
+                const item = mItem[1];
+                const link = item.match(/href="([^"]+)"/i)?.[1] || "";
+                let title = item.match(/alt="([^"]+)"/i)?.[1] || "";
+                title = title.replace(pCleanup, "").replace(pHtmlEntity, "").trim();
+                
+                const image = item.match(/data-src="([^"]+)"/i)?.[1] || "";
+                const quality = item.match(/quality">([^<]+)</i)?.[1]?.trim() || "";
+                const views = item.match(/bviews">[\s\S]*?<\s*\/\s*i\s*>\s*([^<]+)</i)?.[1]?.trim() || "";
+                const category = item.match(/bCat">([^<]+)</i)?.[1]?.trim() || "";
+
+                result.asian.push({ title, link, image, quality, views, category });
+            }
+        }
+        // --- 3. الأنميات ---
+        else if (secTitle.includes("الأنميات") || secTitle.includes("انميات")) {
+            const itemRegex = /<div class="epDivHome">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let mItem;
+            while ((mItem = itemRegex.exec(secHTML)) !== null && result.anime.length < 6) {
+                const item = mItem[1];
+                const link = item.match(/href="([^"]+)"/i)?.[1] || "";
+                let title = item.match(/alt="([^"]+)"/i)?.[1] || "";
+                title = title.replace(pCleanup, "").replace(pHtmlEntity, "").trim();
+                
+                const image = item.match(/data-src="([^"]+)"/i)?.[1] || "";
+                const category = item.match(/sCat">([^<]+)</i)?.[1]?.trim() || "";
+                const year = item.match(/sCat">[^<]+<\s*\/\s*span\s*>\s*<span>([^<]+)</i)?.[1]?.trim() || "";
+
+                result.anime.push({ title, link, image, category, year });
+            }
+        }
+        // --- 4. الحلقات المضافة (المسلسلات) ---
+        else if (secTitle.includes("الحلقات المضافة") || secTitle.includes("مسلسلات")) {
+            const itemRegex = /<div class="epDivHome">([\s\S]*?)<\/div>\s*<\/div>/gi;
+            let mItem;
+            while ((mItem = itemRegex.exec(secHTML)) !== null && result.series.length < 6) {
+                const item = mItem[1];
+                const link = item.match(/href="([^"]+)"/i)?.[1] || "";
+                let title = item.match(/alt="([^"]+)"/i)?.[1] || "";
+                title = title.replace(pCleanup, "").replace(pHtmlEntity, "").trim();
+                
+                const image = item.match(/data-src="([^"]+)"/i)?.[1] || "";
+                const status = item.match(/epStatus">([^<]+)</i)?.[1]?.trim() || "";
+                const count = item.match(/<span>(\d+\s*حلقة)</i)?.[1] || "";
+
+                result.series.push({ title, link, image, status, episodes_count: count });
+            }
+        }
+    }
+
+    return result;
+};
+
+
+// =========================================================
+// المسارات (Routes)
+// =========================================================
+
+// مسارات الصفحة الرئيسية العامة
+app.get('/api/page', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([emptyResponse]);
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([emptyResponse]);
+    const data = extractHomePageData(html);
+    res.json(data.newList.length > 0 ? data.newList : [emptyResponse]);
+});
+
+app.get('/api/pagetop', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([emptyResponse]);
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([emptyResponse]);
+    const data = extractHomePageData(html);
+    res.json(data.topList.length > 0 ? data.topList : [emptyResponse]);
+});
+
+// مسارات الصفحة الرئيسية المخصصة (أفلام، مسلسلات، الخ)
+app.get('/api/homemovie', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+    const data = extractHomeCategories(html);
+    res.json(data.movies);
+});
+
+app.get('/api/homeseries', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+    const data = extractHomeCategories(html);
+    res.json(data.series);
+});
+
+app.get('/api/homeasian', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+    const data = extractHomeCategories(html);
+    res.json(data.asian);
+});
+
+app.get('/api/homeanime', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+    const data = extractHomeCategories(html);
+    res.json(data.anime);
+});
+
+// استخراج البيانات الأساسية (تفاصيل وسيرفرات المشاهدة)
+app.get('/api/details', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+
+    // استخدام التعبير المحدث لمعالجة المسافات
+    let title = html.match(/<div class="h1 title">([\s\S]*?)<\/div>/i)?.[1]?.trim() || "";
+    if (title) title = title.replace(pCleanup, "").replace(pHtmlEntity, "").trim();
+
+    const poster = html.match(/<div class="posterImg">[\s\S]*?<img[^>]*src="([^"]+)"/i)?.[1] || "";
+    const rating = html.match(/<span class="singleStar">[\s\S]*?<strong>([^<]+)<\/strong>/i)?.[1]?.trim() || "";
+    
+    let description = html.match(/<div class="singleDesc">[\s\S]*?<p>([\s\S]*?)<\/p>/i)?.[1]?.trim() || "";
+    description = description.replace(/\r?\n|\r/g, " ").replace(/"/g, "\\\"");
+
+    const category = html.match(/تصنيف[^:]*:\s*<a[^>]*rel="tag">([^<]+)</i)?.[1]?.trim() || "";
+    const quality = html.match(/جودة[^:]*:\s*<a[^>]*>([^<]+)</i)?.[1]?.trim() || "";
+    const year = html.match(/(?:سنة الإنتاج|موعد الصدور)[^:]*:\s*(?:<a[^>]*>)?([^<]+?)(?:<\/a>)?\s*(?:<\/span>|$)/i)?.[1]?.trim() || "";
+    const duration = html.match(/(?:مدة[^:]*:|توقيت[^:]*:)\s*([^<]+?)\s*(?:<\/span>|$)/i)?.[1]?.trim() || "";
+    const itemId = html.match(/رقم[^:]*:\s*#?(\d+)/i)?.[1]?.trim() || "";
+    const shortLink = html.match(/id="liskSh">([^<]+)</i)?.[1]?.trim() || "";
+    const watchLevel = html.match(/(?:مستوى المشاهدة|مستوي المشاهدة)[^:]*:\s*<a[^>]*>([^<]+)</i)?.[1]?.trim() || "";
+    const status = html.match(/حالة[^:]*:\s*<a[^>]*>([^<]+)</i)?.[1]?.trim() || "";
+    const episodesCount = html.match(/الحلقات[^:]*:\s*(\d+)\s*حلقة/i)?.[1]?.trim() || "";
+    const country = html.match(/دولة[^:]*:\s*([^<]+?)\s*(?:<\/span>|$)/i)?.[1]?.trim() || "";
+    const language = html.match(/لغة[^:]*:\s*([^<]+?)\s*(?:<\/span>|$)/i)?.[1]?.trim() || "";
+
+    const serversData = {};
+    const mServers = [...html.matchAll(/player_iframe\.location\.href\s*=\s*'([^']+)'/gi)];
+    mServers.forEach((match, index) => {
+        serversData[`servers${index + 1}`] = match[1].replace(/&amp;/g, "&"); 
     });
 
-    const encryptedResponse = Buffer.from(response.data).toString("utf-8");
-    const decryptedResponse = decryptAES(encryptedResponse);
-    return { encrypted_response: encryptedResponse, decrypted_response: JSON.parse(decryptedResponse) };
-}
+    const dataJson = {
+        title, poster, rating, description, year, duration, quality, 
+        watch_level: watchLevel, id: itemId, short_link: shortLink, categories: category,
+        ...serversData
+    };
 
-async function resolveRedirectUrl(channelId, fakeUrl) {
-    let currentUrl = fakeUrl; let currentAgent = "redirect"; let encryptedRawData = "";
-    let maxSteps = 5; let lastParsedData = null;
+    if (status) dataJson.status = status;
+    if (episodesCount) dataJson.episodes_count = episodesCount;
+    if (country) dataJson.country = country;
+    if (language) dataJson.language = language;
 
-    while (maxSteps > 0) {
-        maxSteps--;
-        let urlToSend = currentUrl;
-        if (currentUrl.includes(".LS.V2") && currentUrl.endsWith("/s")) { urlToSend = convertFakeUrlToRealUrl(currentUrl, channelId); }
+    res.json([dataJson]);
+});
 
-        let endpoint = (currentAgent === "double_redirect") ? "getLiveByDoubleRedirect" : "getLiveByRedirect";
-        const result = await sendRequest(channelId, urlToSend, currentAgent, encryptedRawData, endpoint);
-        const data = result.decrypted_response.data;
-        
-        if (!data || !data.url) return null;
 
-        const newAgent = data.agent || "stop";
-        const parsed = parseDataUrl(data.url, null);
-        lastParsedData = parsed;
-        
-        if (newAgent === "advanced" || newAgent === "stop") {
-            if (parsed.url && parsed.url.includes(".LS.V2")) {
-                if (result.encrypted_response && !encryptedRawData) {
-                    encryptedRawData = result.encrypted_response.trim();
-                    currentUrl = data.url; currentAgent = "double_redirect"; continue;
-                }
-                break;
+// استخراج المواسم
+app.get('/api/sezon', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+
+    const domain = html.match(/id="liskSh">(https?:\/\/[^\/]+)/i)?.[1] || "";
+    const seasonList = [];
+    
+    const seasonSection = html.match(/<div class="seasonLoop">([\s\S]*?)(?=<div class="col-xl-12|<\/div>\s*<\/div>\s*$)/i);
+    
+    if (seasonSection) {
+        const seasonHTML = seasonSection[1];
+        const mSeasonRegex = /<div class="seasonDiv[^"]*"[^>]*onclick="window\.location\.href\s*=\s*'([^']+)'[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+        let mSeason;
+
+        while ((mSeason = mSeasonRegex.exec(seasonHTML)) !== null) {
+            const seasonLink = mSeason[1];
+            const seasonContent = mSeason[2];
+
+            const poster = seasonContent.match(/data-src="([^"]+)"/i)?.[1] || "";
+            // استخدام التعبير المحدث لمعالجة المسافات
+            const title = seasonContent.match(/<div class="title">([\s\S]*?)<\/div>/i)?.[1]?.trim() || "";
+            const views = seasonContent.match(/<i class="fa fa-eye"><\/i>\s*([^<]+)</i)?.[1]?.trim() || "";
+            
+            let fullLink = seasonLink;
+            if (domain && seasonLink.startsWith("/")) {
+                fullLink = domain + seasonLink;
             }
-            if (parsed.url && (parsed.url.includes(".m3u8") || parsed.url.includes(".mpd"))) { return parsed; }
-            if (parsed.url && parsed.url.startsWith("http")) {
-                const fetchResult = await fetchIntermediateUrl(parsed.url, parsed.headers, parsed.agent);
-                if (fetchResult.success) {
-                    return { url: fetchResult.url, agent: parsed.agent, headers: parsed.headers, drm: parsed.drm, mediatype: fetchResult.mediatype };
-                }
-                if (parsed.iframe && parsed.iframe.startsWith("http")) {
-                    const iframeResult = await fetchIntermediateUrl(parsed.iframe, parsed.headers, parsed.agent);
-                    if (iframeResult.success) { return { url: iframeResult.url, agent: parsed.agent, headers: parsed.headers, drm: parsed.drm, mediatype: iframeResult.mediatype }; }
-                }
-                if (result.encrypted_response && !encryptedRawData) {
-                    encryptedRawData = result.encrypted_response.trim(); currentUrl = data.url; currentAgent = "double_redirect"; continue;
-                }
-                break;
-            }
-            if (result.encrypted_response && !encryptedRawData) {
-                encryptedRawData = result.encrypted_response.trim(); currentUrl = data.url; currentAgent = "double_redirect"; continue;
+
+            seasonList.push({ title, link: fullLink, poster, views });
+        }
+    }
+
+    res.json(seasonList);
+});
+
+
+// استخراج الحلقات
+app.get('/api/eclip', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.json([]);
+
+    const html = await fetchHtmlContent(targetUrl);
+    if (!html) return res.json([]);
+
+    const episodeList = [];
+    const mEpisodeRegex = /<a href="([^"]+)"[^>]*>\s*الحلقة\s+(\d+)\s*<\/a>/gi;
+    let mEpisode;
+
+    while ((mEpisode = mEpisodeRegex.exec(html)) !== null) {
+        const link = mEpisode[1];
+        const number = mEpisode[2];
+        const title = `الحلقة ${number}`;
+
+        episodeList.push({ number, title, link });
+    }
+
+    res.json(episodeList);
+});
+
+
+
+
+
+
+
+// =========================================================
+// استخراج الحلقه التاليه 
+// =========================================================
+app.get('/api/nextepisode', async (req, res) => {
+    const currentUrl = req.query.url;
+    // إرجاع مصفوفة فارغة إذا لم يتم إرسال رابط
+    if (!currentUrl) return res.json([]);
+
+    // 1. جلب صفحة الحلقة الحالية
+    const currentHtml = await fetchHtmlContent(currentUrl);
+    // إرجاع مصفوفة فارغة إذا فشل جلب الصفحة
+    if (!currentHtml) return res.json([]);
+
+    // 2. تجميع كل الحلقات لمعرفة من هي الحلقة التالية
+    const episodeRegex = /<a href="([^"]+)"([^>]*)>\s*(الحلقة\s+\d+)\s*<\/a>/gi;
+    let episodes = [];
+    let match;
+    
+    while ((match = episodeRegex.exec(currentHtml)) !== null) {
+        episodes.push({
+            link: match[1],
+            attributes: match[2],
+            title: match[3]
+        });
+    }
+
+    let nextEpisodeLink = "";
+    let nextEpisodeTitle = "";
+
+    // البحث عن الحلقة المفعلة "active" وأخذ الحلقة التي بعدها
+    for (let i = 0; i < episodes.length; i++) {
+        if (episodes[i].attributes.includes('active')) {
+            // التحقق إذا كان هناك حلقة تالية (ليست الحلقة الأخيرة)
+            if (i + 1 < episodes.length) {
+                nextEpisodeLink = episodes[i + 1].link;
+                nextEpisodeTitle = episodes[i + 1].title;
             }
             break;
         }
-        
-        if (newAgent === "redirect" || newAgent === "double_redirect") {
-            currentUrl = data.url; currentAgent = newAgent; encryptedRawData = ""; continue;
-        }
-        break;
     }
 
-    if (lastParsedData && lastParsedData.url && lastParsedData.url.startsWith("http")) { return lastParsedData; }
-    return null;
-}
-
-async function processServer(id_live, serverName, urlData, agentData) {
-    if (urlData && urlData.startsWith("{")) {
-        let parsed;
-        try {
-            const obj = JSON.parse(urlData);
-            parsed = { url: obj.url || "", agent: obj.agent || agentData, headers: obj.headers || {}, drm: obj.drm || null, mediatype: obj.mediatype || null };
-        } catch(e) { parsed = { url: urlData, agent: agentData, headers: {}, drm: null, mediatype: null }; }
-        
-        const isRedirect = (parsed.agent === "redirect" || agentData === "redirect");
-        if (isRedirect && parsed.url) {
-            const resolved = await resolveRedirectUrl(id_live, parsed.url);
-            if (resolved && resolved.url && (resolved.url.includes(".m3u8") || resolved.url.includes(".mpd"))) { return createServerObject(serverName + " ", resolved.url, resolved.agent, resolved.headers, resolved.drm || parsed.drm, resolved.mediatype); }
-            else if (resolved && resolved.url) { return createServerObject(serverName + " ⚠️", resolved.url, resolved.agent, resolved.headers, resolved.drm || parsed.drm, resolved.mediatype); }
-            else { return createServerObject(serverName + "", parsed.url, parsed.agent, parsed.headers, parsed.drm, parsed.mediatype); }
-        } else { return createServerObject(serverName, parsed.url, parsed.agent, parsed.headers, parsed.drm, parsed.mediatype); }
+    // إذا لم يجد حلقة تالية (هذه آخر حلقة) يرجع []
+    if (!nextEpisodeLink) {
+        return res.json([]);
     }
-    
-    const isRedirect = (agentData === "redirect");
-    if (isRedirect) {
-        const resolved = await resolveRedirectUrl(id_live, urlData);
-        if (resolved && resolved.url && (resolved.url.includes(".m3u8") || resolved.url.includes(".mpd"))) { return createServerObject(serverName + "", resolved.url, resolved.agent, resolved.headers, resolved.drm, resolved.mediatype); }
-        else if (resolved && resolved.url) { return createServerObject(serverName + " ", resolved.url, resolved.agent || DEFAULT_AGENT, resolved.headers || DEFAULT_HEADERS, resolved.drm, resolved.mediatype); }
-        else { return createServerObject(serverName + " ", "", DEFAULT_AGENT, DEFAULT_HEADERS, null, null); }
-    }
-    return createServerObject(serverName, urlData, agentData, {}, null, null);
-}
 
-// ==========================================
-// 1. مسار جلب القنوات (مع الكاش الذكي 5 دقائق)
-// ==========================================
-app.get("/channels", async (req, res) => {
-    try {
-        const topic = req.query.topic || "arabic_sport";
-        const cacheKey = `channels_${topic}`;
-        
-        const data = await fetchWithCache(cacheKey, async () => {
-            const postData = {
-                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-                "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-                "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                "appCount": "{\"adsFailed\":73,\"adsLoaded\":56,\"adsShowed\":17,\"runCount\":8}",
-                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/", "type": "tv", "topic": topic
-            };
-            const encryptedBody = encryptAES(JSON.stringify(postData));
-            const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveByTopic", encryptedBody, {
-                headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-                timeout: 30000
-            });
-            const jsonResponse = JSON.parse(decryptAES(response.data));
-            let rawChannels = Array.isArray(jsonResponse) ? jsonResponse : (jsonResponse.channels || jsonResponse.live || []);
-            return rawChannels.map(ch => ({
-                type: ch.type || "tv", id_live: ch.id_live || "", name: ch.name || "",
-                url: ch.url || "", agent: ch.agent || "", backup: ch.backup || "",
-                img_url: ch.img_url || "", id_topic: ch.id_topic || topic
-            }));
-        });
-        
-        res.json(data);
-    } catch (error) { res.status(500).json({ error: true, message: error.message }); }
-});
+    // 3. الدخول بذكاء إلى صفحة الحلقة التالية لجلب سيرفراتها
+    const nextHtml = await fetchHtmlContent(nextEpisodeLink);
+    if (!nextHtml) return res.json([]);
 
-async function getOrFetchStreams(id_live, baseUrl) {
-    const cacheKey = `stream_full_${id_live}`;
-    
-    return fetchWithCache(cacheKey, async () => {
-        const postData = {
-            "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-            "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-            "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-            "isPremium": false, "isCoupon_active": false, "hideAds": false,
-            "appCount": "{\"adsFailed\":468,\"adsLoaded\":240,\"adsShowed\":116,\"runCount\":54}",
-            "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-            "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live
-        };
+    // استخراج الـ ID للحلقة التالية
+    const itemId = nextHtml.match(/رقم[^:]*:\s*#?(\d+)/i)?.[1]?.trim() || "";
 
-        const encryptedBody = encryptAES(JSON.stringify(postData));
-        const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedBody, {
-            headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-            timeout: 15000, responseType: "arraybuffer" 
-        });
-
-        const decryptedResponse = decryptAES(Buffer.from(response.data).toString("utf-8"));
-        const rawJson = JSON.parse(decryptedResponse);
-        const liveData = rawJson.live || {};
-
-        let rawStreams = [];
-        if (liveData.url && liveData.url !== "empty") rawStreams.push({ url: liveData.url, agent: liveData.agent || "" });
-        if (liveData.backup) {
-            const backupParts = liveData.backup.split("-;-");
-            for (const part of backupParts) {
-                const trimmedPart = part.trim();
-                if (!trimmedPart) continue;
-                const subParts = trimmedPart.split("--");
-                const linkData = subParts[0] ? subParts[0].trim() : "";
-                const agentData = subParts[1] ? subParts[1].trim() : "";
-                if (linkData && linkData !== "empty") rawStreams.push({ url: linkData, agent: agentData });
-            }
-        }
-
-        let allServerResults = [];
-        for (const item of rawStreams) {
-            if (item.agent === "redirect") {
-                try {
-                    const redirectPayload = {
-                        "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                        "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-                        "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-                        "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                        "appCount": "{\"adsFailed\":468,\"adsLoaded\":240,\"adsShowed\":116,\"runCount\":54}",
-                        "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                        "id": id_live, "url": item.url, "agent": "redirect"
-                    };
-
-                    const encryptedRedirectBody = encryptAES(JSON.stringify(redirectPayload));
-                    const redirectRes = await axios.post("http://redirect.1spbgmu.com/redirect/getLiveByRedirect", encryptedRedirectBody, {
-                        headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "redirect.1spbgmu.com", "Connection": "Keep-Alive" },
-                        timeout: 15000, responseType: "arraybuffer"
-                    });
-
-                    const decryptedStr = decryptAES(Buffer.from(redirectRes.data).toString("utf-8"));
-                    const parsedRedirect = JSON.parse(decryptedStr);
-
-                    if (parsedRedirect && parsedRedirect.data && parsedRedirect.data.agent === "double_redirect") {
-                        const originalUrlString = parsedRedirect.data.url; 
-                        parsedRedirect.original_raw_url = originalUrlString;
-                        const serverIndex = allServerResults.length;
-                        let innerObj = {};
-                        try { innerObj = JSON.parse(originalUrlString); } catch (e) { innerObj = { url: originalUrlString }; }
-                        innerObj.url = `${baseUrl}/double_redirect?id_live=${encodeURIComponent(id_live)}&s=${serverIndex}`;
-                        parsedRedirect.data.url = JSON.stringify(innerObj);
-                    }
-                    allServerResults.push(parsedRedirect);
-                } catch (err) {}
-            } else {
-                let innerUrlString = item.url;
-                if (!innerUrlString.startsWith("{")) {
-                    innerUrlString = JSON.stringify({ "url": item.url, "agent": item.agent || DEFAULT_AGENT, "acceptSSL": "1", "headers": { "User-Agent": item.agent || DEFAULT_AGENT } });
-                }
-                allServerResults.push({ "result": 0, "message": { "en": "operation succeeded", "ar": "تمت العملية بنجاح" }, "data": { "url": innerUrlString, "agent": "advanced" } });
-            }
-        }
-        return allServerResults;
+    // استخراج السيرفرات للحلقة التالية
+    const serversData = {};
+    const mServers = [...nextHtml.matchAll(/player_iframe\.location\.href\s*=\s*'([^']+)'/gi)];
+    mServers.forEach((match, index) => {
+        serversData[`servers${index + 1}`] = match[1].replace(/&amp;/g, "&"); 
     });
-}
 
-const DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
-
-app.get("/stream", async (req, res) => {
-    try {
-        const id_live = req.query.id_live;
-        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id_live" });
-
-        const cacheKey = `stream_full_array_${id_live}`;
-
-        const data = await fetchWithCache(cacheKey, async () => {
-            const postData = {
-                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-                "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-                "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                "appCount": "{\"adsFailed\":468,\"adsLoaded\":240,\"adsShowed\":116,\"runCount\":54}",
-                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live
-            };
-
-            const encryptedBody = encryptAES(JSON.stringify(postData));
-            const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedBody, {
-                headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-                timeout: 15000, responseType: "arraybuffer" 
-            });
-
-            const decryptedResponse = decryptAES(Buffer.from(response.data).toString("utf-8"));
-            const rawJson = JSON.parse(decryptedResponse);
-            const liveData = rawJson.live || {};
-
-            let rawStreams = [];
-            if (liveData.url && liveData.url !== "empty") rawStreams.push({ url: liveData.url, agent: liveData.agent || "" });
-            if (liveData.backup) {
-                const backupParts = liveData.backup.split("-;-");
-                for (const part of backupParts) {
-                    const trimmedPart = part.trim();
-                    if (!trimmedPart) continue;
-                    const subParts = trimmedPart.split("--");
-                    const linkData = subParts[0] ? subParts[0].trim() : "";
-                    const agentData = subParts[1] ? subParts[1].trim() : "";
-                    if (linkData && linkData !== "empty") rawStreams.push({ url: linkData, agent: agentData });
-                }
-            }
-
-            let finalStreamsArray = [];
-            let serverCounter = 1;
-
-            for (const item of rawStreams) {
-                let serverPayload = null;
-                if (item.agent === "redirect" || item.agent === "double_redirect") {
-                    try {
-                        let currentAgent = item.agent; let currentUrl = item.url; let rawData = "";
-
-                        if (currentAgent === "redirect") {
-                            const redirectPayload = {
-                                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-                                "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-                                "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                                "appCount": "{\"adsFailed\":468,\"adsLoaded\":240,\"adsShowed\":116,\"runCount\":54}",
-                                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                                "id": id_live, "url": currentUrl, "agent": "redirect"
-                            };
-
-                            const encryptedRedirectBody = encryptAES(JSON.stringify(redirectPayload));
-                            const redirectRes = await axios.post("http://redirect.1spbgmu.com/redirect/getLiveByRedirect", encryptedRedirectBody, {
-                                headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "redirect.1spbgmu.com", "Connection": "Keep-Alive" },
-                                timeout: 15000, responseType: "arraybuffer"
-                            });
-
-                            const decryptedStr = decryptAES(Buffer.from(redirectRes.data).toString("utf-8"));
-                            serverPayload = JSON.parse(decryptedStr);
-                            if (serverPayload && serverPayload.data && serverPayload.data.agent === "double_redirect") {
-                                currentAgent = "double_redirect"; currentUrl = serverPayload.data.url;
-                            }
-                        }
-
-                        if (currentAgent === "double_redirect") {
-                            try {
-                                let parsedObj = JSON.parse(currentUrl);
-                                let fetchHeaders = parsedObj.headers || {};
-                                let resHtml = await axios.get(parsedObj.url, { headers: fetchHeaders, timeout: 10000 });
-                                rawData = typeof resHtml.data === 'string' ? resHtml.data : JSON.stringify(resHtml.data);
-                            } catch (e) {
-                                try {
-                                    let resHtml = await axios.get(currentUrl, { timeout: 10000 });
-                                    rawData = typeof resHtml.data === 'string' ? resHtml.data : JSON.stringify(resHtml.data);
-                                } catch (err) {}
-                            }
-
-                            const doubleRedirectPayload = {
-                                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
-                                "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
-                                "isPremium": false, "isCoupon_active": false, "hideAds": false,
-                                "appCount": "{\"adsFailed\":496,\"adsLoaded\":251,\"adsShowed\":121,\"runCount\":58}",
-                                "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                                "id": id_live, "url": currentUrl, "agent": "double_redirect", "raw_data": rawData 
-                            };
-
-                            const encryptedDoubleBody = encryptAES(JSON.stringify(doubleRedirectPayload));
-                            const doubleRes = await axios.post("http://redirect.1spbgmu.com/redirect/getLiveByDoubleRedirect", encryptedDoubleBody, {
-                                headers: { "Content-Type": "application/json; charset=utf-8", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "redirect.1spbgmu.com", "Connection": "Keep-Alive", "Accept-Encoding": "gzip" },
-                                timeout: 15000, responseType: "arraybuffer"
-                            });
-
-                            const decryptedDoubleStr = decryptAES(Buffer.from(doubleRes.data).toString("utf-8"));
-                            serverPayload = JSON.parse(decryptedDoubleStr);
-                        }
-                    } catch (err) { continue; }
-                } else {
-                    let innerUrlString = item.url;
-                    if (!innerUrlString.startsWith("{")) {
-                        innerUrlString = JSON.stringify({ "url": item.url, "agent": item.agent || DEFAULT_USER_AGENT, "acceptSSL": "1", "headers": { "User-Agent": item.agent || DEFAULT_USER_AGENT } });
-                    }
-                    serverPayload = { "result": 0, "message": { "en": "operation succeeded", "ar": "تمت العملية بنجاح" }, "data": { "url": innerUrlString, "agent": "advanced" } };
-                }
-
-                if (serverPayload) {
-                    serverPayload.name = `سيرفر ${serverCounter}`; 
-                    if(serverPayload.data) { serverPayload.data.name = `سيرفر ${serverCounter}`; }
-                    finalStreamsArray.push(serverPayload);
-                    serverCounter++;
-                }
-            }
-            return finalStreamsArray;
-        });
-
-        res.json(data);
-    } catch (error) { res.status(500).json({ error: true, message: error.message }); }
+    // 4. إرجاع النتيجة النهائية الجاهزة محاطة بـ [ ]
+    res.json([{
+        title: nextEpisodeTitle,
+        link: nextEpisodeLink,
+        id: itemId,
+        ...serversData
+    }]);
 });
 
-app.post("/get-redirect-data", async (req, res) => {
-    try {
-        const id_live = req.body.id_live; let url = req.body.url; const agent = req.body.agent || "redirect";
-        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id_live في الـ Body" });
-
-        const cacheKey = `redirect_post_${id_live}_${url || 'nourl'}`;
-        
-        const data = await fetchWithCache(cacheKey, async () => {
-            if (!url) {
-                const streamsPostData = {
-                    "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                    "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul", "device_type": "phone",
-                    "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                    "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live
-                };
-                
-                const encryptedStreamBody = encryptAES(JSON.stringify(streamsPostData));
-                const streamRes = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedStreamBody, {
-                    headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-                    responseType: "arraybuffer", timeout: 15000
-                });
-                
-                const decryptedStreamRes = decryptAES(Buffer.from(streamRes.data).toString("utf-8"));
-                const streamJson = JSON.parse(decryptedStreamRes);
-                url = streamJson.live?.url;
-                if (!url || url === "empty") throw new Error("لم يتم العثور على رابط أساسي لهذه القناة لإرساله");
-            }
-
-            let result = await sendRequest(id_live, url, agent, "", "getLiveByRedirect");
-            let responseData = result.decrypted_response;
-            let returnedUrl = responseData?.data?.url || "";
-
-            let isDirectStream = false; let actualUrlObj = {}; let actualUrl = returnedUrl; let actualHeaders = {};
-            try { actualUrlObj = JSON.parse(returnedUrl); actualUrl = actualUrlObj.url || returnedUrl; actualHeaders = actualUrlObj.headers || {}; } catch(e) {}
-
-            const isGateway = actualUrl.includes("token.") || actualUrl.includes("?url=") || actualUrl.includes(".LS.V2");
-            const hasStreamExt = actualUrl.includes(".m3u8") || actualUrl.includes(".mpd");
-
-            if (hasStreamExt && !isGateway && returnedUrl !== "1") isDirectStream = true;
-
-            if (!isDirectStream && returnedUrl !== "1") {
-                let rawData = "";
-                if (actualUrl.includes("token.easybroadcast.io")) {
-                    try {
-                        const tokenRes = await axios.get(actualUrl, { headers: actualHeaders });
-                        if (tokenRes.data && typeof tokenRes.data === 'object') {
-                            rawData = Object.keys(tokenRes.data).map(key => `${encodeURIComponent(key)}=${encodeURIComponent(tokenRes.data[key])}`).join('&');
-                        } else if (typeof tokenRes.data === 'string') { rawData = tokenRes.data; }
-                    } catch (err) {}
-                } else if (result.encrypted_response) { rawData = result.encrypted_response.trim(); }
-
-                result = await sendRequest(id_live, returnedUrl, "double_redirect", rawData, "getLiveByDoubleRedirect");
-            }
-            return result.decrypted_response;
-        });
-
-        res.json(data);
-    } catch (error) { res.status(error.message.includes("لم يتم العثور") ? 404 : 500).json({ error: true, message: error.message }); }
+// تشغيل السيرفر
+app.listen(PORT, () => {
+    console.log(`السيرفر يعمل بنجاح، استمتع بالبرمجة! المنفذ: ${PORT}`);
 });
-
-app.get("/get-redirect-data", async (req, res) => {
-    try {
-        const id_live = req.query.id_live;
-        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id_live في الرابط" });
-
-        const cacheKey = `redirect_get_${id_live}`;
-        
-        const data = await fetchWithCache(cacheKey, async () => {
-            const streamsPostData = {
-                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul", "device_type": "phone",
-                "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live
-            };
-            
-            const encryptedStreamBody = encryptAES(JSON.stringify(streamsPostData));
-            const streamRes = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedStreamBody, {
-                headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-                responseType: "arraybuffer", timeout: 15000
-            });
-            
-            const decryptedStreamRes = decryptAES(Buffer.from(streamRes.data).toString("utf-8"));
-            const streamJson = JSON.parse(decryptedStreamRes);
-            const url = streamJson.live?.url;
-
-            if (!url || url === "empty") throw new Error("لم يتم العثور على رابط أساسي لهذه القناة");
-
-            let result = await sendRequest(id_live, url, "redirect", "", "getLiveByRedirect");
-            let responseData = result.decrypted_response;
-            let returnedUrl = responseData?.data?.url || "";
-
-            let isDirectStream = false; let actualUrlObj = {}; let actualUrl = returnedUrl; let actualHeaders = {};
-            try { actualUrlObj = JSON.parse(returnedUrl); actualUrl = actualUrlObj.url || returnedUrl; actualHeaders = actualUrlObj.headers || {}; } catch(e) {}
-
-            const isGateway = actualUrl.includes("token.") || actualUrl.includes("?url=") || actualUrl.includes(".LS.V2");
-            const hasStreamExt = actualUrl.includes(".m3u8") || actualUrl.includes(".mpd");
-
-            if (hasStreamExt && !isGateway && returnedUrl !== "1") isDirectStream = true;
-
-            if (!isDirectStream && returnedUrl !== "1") {
-                let rawData = "";
-                if (actualUrl.includes("token.easybroadcast.io")) {
-                    try {
-                        const tokenRes = await axios.get(actualUrl, { headers: actualHeaders });
-                        if (tokenRes.data && typeof tokenRes.data === 'object') {
-                            rawData = Object.keys(tokenRes.data).map(key => `${encodeURIComponent(key)}=${encodeURIComponent(tokenRes.data[key])}`).join('&');
-                        } else if (typeof tokenRes.data === 'string') { rawData = tokenRes.data; }
-                    } catch (err) {}
-                } else if (result.encrypted_response) { rawData = result.encrypted_response.trim(); }
-
-                result = await sendRequest(id_live, returnedUrl, "double_redirect", rawData, "getLiveByDoubleRedirect");
-            }
-            return result.decrypted_response;
-        });
-
-        res.json(data);
-    } catch (error) { res.status(error.message.includes("لم يتم العثور") ? 404 : 500).json({ error: true, message: error.message }); }
-});
-
-app.get("/live_id/:id", async (req, res) => {
-    try {
-        const id_live = req.params.id;
-        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id في الرابط" });
-
-        const cacheKey = `smart_live_${id_live}`;
-        
-        const data = await fetchWithCache(cacheKey, async () => {
-            const localBaseUrl = `http://localhost:${PORT}`;
-            try {
-                const redirectResponse = await axios.get(`${localBaseUrl}/get-redirect-data?id_live=${id_live}`);
-                const redirectData = redirectResponse.data;
-                const returnedUrl = redirectData?.data?.url || "";
-
-                if (returnedUrl && returnedUrl !== "1" && returnedUrl !== "empty") { return redirectData; }
-            } catch (err) {}
-
-            const streamResponse = await axios.get(`${localBaseUrl}/stream?id_live=${id_live}`);
-            const streamData = streamResponse.data;
-            let hasValidStreams = false;
-            if (streamData && Array.isArray(streamData.streams)) {
-                hasValidStreams = streamData.streams.some(server => server.url && server.url.trim() !== "");
-            }
-
-            if (hasValidStreams) { return streamData; }
-
-            try {
-                const lastResponse = await axios.get(`${localBaseUrl}/last/${id_live}`);
-                return lastResponse.data;
-            } catch (lastErr) { return streamData; }
-        });
-
-        res.json(data);
-    } catch (error) { res.status(500).json({ error: true, message: "حدث خطأ أثناء معالجة المسار الذكي: " + error.message }); }
-});
-
-app.get("/last/:id_live", async (req, res) => {
-    try {
-        const id_live = req.params.id_live;
-        if (!id_live) return res.status(400).json({ error: true, message: "يرجى إرسال id_live في المسار" });
-
-        const cacheKey = `last_${id_live}`;
-        
-        const data = await fetchWithCache(cacheKey, async () => {
-            const streamsPostData = {
-                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul", "device_type": "phone",
-                "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                "type": "tv", "id_live": id_live, "id": id_live, "live_id": id_live, "channel_id": id_live
-            };
-            
-            const encryptedStreamBody = encryptAES(JSON.stringify(streamsPostData));
-            const streamRes = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveAllStreamsById", encryptedStreamBody, {
-                headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-                responseType: "arraybuffer", timeout: 15000
-            });
-            
-            const decryptedStreamRes = decryptAES(Buffer.from(streamRes.data).toString("utf-8"));
-            const streamJson = JSON.parse(decryptedStreamRes);
-            const liveData = streamJson.live || {};
-            const url = liveData.url;
-
-            if (!url || url === "empty") throw new Error("لم يتم العثور على رابط أساسي لهذه القناة");
-
-            const redirectResult = await sendRequest(id_live, url, "redirect", "", "getLiveByRedirect");
-            let redirectData = redirectResult.decrypted_response;
-
-            if (redirectData && redirectData.data && redirectData.data.agent === "double_redirect") {
-                const currentUrl = redirectData.data.url;
-                let rawData = "";
-                try {
-                    let parsedObj = JSON.parse(currentUrl);
-                    let fetchHeaders = parsedObj.headers || {};
-                    let resHtml = await axios.get(parsedObj.url, { headers: fetchHeaders, timeout: 10000 });
-                    rawData = typeof resHtml.data === 'string' ? resHtml.data : JSON.stringify(resHtml.data);
-                } catch (e) {
-                    try {
-                        let resHtml = await axios.get(currentUrl, { timeout: 10000 });
-                        rawData = typeof resHtml.data === 'string' ? resHtml.data : JSON.stringify(resHtml.data);
-                    } catch (err) {}
-                }
-                const doubleResult = await sendRequest(id_live, currentUrl, "double_redirect", rawData, "getLiveByDoubleRedirect");
-                redirectData = doubleResult.decrypted_response;
-            }
-
-            let urlVal = "";
-            if (redirectData && redirectData.data && redirectData.data.url) urlVal = redirectData.data.url.trim();
-
-            if (urlVal !== "1" && urlVal !== "" && urlVal !== "empty") { return redirectData; } 
-            else {
-                let parsedStreams = [];
-                const mainUrl = liveData.url || ""; const mainAgent = liveData.agent || "";
-                
-                if (mainUrl && mainUrl !== "empty") {
-                    const server = await processServer(id_live, "السيرفر الأساسي", mainUrl, mainAgent);
-                    parsedStreams.push(server);
-                }
-
-                const backupStr = liveData.backup || "";
-                if (backupStr) {
-                    const backupParts = backupStr.split("-;-");
-                    for (let i = 0; i < backupParts.length; i++) {
-                        const part = backupParts[i].trim();
-                        if (!part) continue;
-                        const subParts = part.split("--");
-                        const linkData = subParts[0] ? subParts[0].trim() : "";
-                        const agentData = subParts[1] ? subParts[1].trim() : "";
-                        if (!linkData || linkData === "empty") continue;
-                        const server = await processServer(id_live, `سيرفر ${parsedStreams.length + 1}`, linkData, agentData);
-                        parsedStreams.push(server);
-                    }
-                }
-
-                return { id_live: liveData.id_live || id_live, name: liveData.name || "", img_url: liveData.img_url || "", streams: parsedStreams };
-            }
-        });
-        
-        res.json(data);
-    } catch (error) { res.status(error.message.includes("لم يتم العثور") ? 404 : 500).json({ error: true, message: error.message }); }
-});
-
-app.get("/mach", async (req, res) => {
-    try {
-        const cacheKey = `matches_data`;
-        
-        const data = await fetchWithCache(cacheKey, async () => {
-            const postData = {
-                "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
-                "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul", "device_type": "phone",
-                "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/",
-                "type": "tv"
-            };
-
-            const encryptedBody = encryptAES(JSON.stringify(postData));
-            const response = await axios.post("http://sport.1spbgmu.com/sport/getMatches", encryptedBody, {
-                headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "sport.1spbgmu.com", "Connection": "Keep-Alive" },
-                timeout: 30000, responseType: "arraybuffer"
-            });
-
-            const encryptedResponse = Buffer.from(response.data).toString("utf-8");
-            const decryptedResponse = decryptAES(encryptedResponse);
-            const jsonResponse = JSON.parse(decryptedResponse);
-
-            let rawMatches = Array.isArray(jsonResponse) ? jsonResponse : (jsonResponse.matches || jsonResponse.data || []);
-
-            return rawMatches.map(match => {
-                let matchTime = ""; let matchStatus = "لم تبدأ"; let dateVal = match.date || "";
-                
-                if (dateVal.includes("انتهت")) { matchStatus = "انتهت"; matchTime = "انتهت"; } 
-                else {
-                    const timeMatch = dateVal.match(/\d{2}:\d{2}/);
-                    if (timeMatch) matchTime = timeMatch[0]; else matchTime = dateVal;
-                }
-
-                let finalScore = "";
-                if (match.firstTeamScore && match.firstTeamScore !== "-") finalScore = match.firstTeamScore;
-
-                return {
-                    title: match.title || "", league: match.topic || "", team1: match.firstTeam || "", team2: match.secondtTeam || "",
-                    team1_logo: match.firstTeamImage || "", team2_logo: match.secondtTeamImage || "", time: matchTime,
-                    date: dateVal, status: matchStatus, score: finalScore, channel: match.channel || "", id_live: match.channel || ""
-                };
-            });
-        });
-
-        res.json(data);
-    } catch (error) { res.status(500).json({ error: true, message: error.message }); }
-});
-
-app.all("/resolve", async (req, res) => {
-    try {
-        const targetUrl = req.query.url || req.body.url;
-        const channelId = req.query.id_live || req.body.id_live || "test";
-        if (!targetUrl) return res.status(400).json({ error: true, message: "يرجى إرسال الرابط (url)" });
-        const result = await resolveRedirectUrl(channelId, targetUrl);
-        res.json(result ? { success: true, ...result } : { error: true, message: "فشل" });
-    } catch (error) { res.status(500).json({ error: true, message: error.message }); }
-});
-
-app.get("/extract", async (req, res) => {
-    try {
-        const targetUrl = req.query.url;
-        const channelId = req.query.id_live || "test";
-        if (!targetUrl) return res.status(400).json({ error: true, message: "يرجى إرسال الرابط (url)" });
-        const result = await resolveRedirectUrl(channelId, targetUrl);
-        res.json({ success: result ? true : false, result: result });
-    } catch (error) { res.status(500).json({ error: true, message: error.message }); }
-});
-
-const allTopics = [
-    {"id_topic":"hot_now","name_topic":"الأكثر مشاهدة","img_url_topic":"http://logo.twoapistack.work/img/topics/hot_now.png","code":""},
-    {"id_topic":"alwan","name_topic":"الوان","img_url_topic":"http://logo.twoapistack.work/img/topics/alwan.jpg","code":""},
-    {"id_topic":"shahid","name_topic":"شاهد","img_url_topic":"http://logo.twoapistack.work/img/topics/shahid.jpg","code":""},
-    {"id_topic":"arabic_sport","name_topic":"رياضة","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_basketball_red.png","code":""},
-    {"id_topic":"ar_1","name_topic":"ترفيه عربي","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_featured_ar.png","code":""},
-    {"id_topic":"ar_2","name_topic":"أخبار","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_newspaper.png","code":""},
-    {"id_topic":"ar_3","name_topic":"أطفال","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_kids.jpg","code":""},
-    {"id_topic":"ar_5","name_topic":"وثائقي","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_documantry.png","code":""},
-    {"id_topic":"ar_6","name_topic":"ديني","img_url_topic":"http://logo.twoapistack.work/img/topics/ic__mosque.png","code":""},
-    {"id_topic":"ar_7","name_topic":"أفلام","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_film.png","code":""},
-    {"id_topic":"ar_8","name_topic":"موسيقى","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_music.jpg","code":""},
-    {"id_topic":"art","name_topic":"ART","img_url_topic":"http://logo.twoapistack.work/img/topics/art.png","code":""},
-    {"id_topic":"osn","name_topic":"OSN","img_url_topic":"http://logo.twoapistack.work/img/topics/osn_logo.png","code":""},
-    {"id_topic":"netflix","name_topic":"NETFLIX","img_url_topic":"http://logo.twoapistack.work/img/topics/netflix.jpg","code":""},
-    {"id_topic":"mbc","name_topic":"MBC","img_url_topic":"http://logo.twoapistack.work/img/topics/mpc.jpg","code":""},
-    {"id_topic":"rotana","name_topic":"روتانا","img_url_topic":"http://logo.twoapistack.work/img/topics/rotana.jpg","code":""},
-    {"id_topic":"cook","name_topic":"الطبخ","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_chef.png","code":""},
-    {"id_topic":"weyyak","name_topic":"وياك","img_url_topic":"http://logo.twoapistack.work/img/topics/weyyak.jpg","code":""},
-    {"id_topic":"bein_entir","name_topic":"بي ان ترفيه","img_url_topic":"http://logo.twoapistack.work/img/topics/bein_enter.jpg","code":""},
-    {"id_topic":"bein_sport","name_topic":"بي ان سبورت","img_url_topic":"http://logo.twoapistack.work/img/topics/bein_sport.png","code":""},
-    {"id_topic":"science","name_topic":"علوم","img_url_topic":"http://logo.twoapistack.work/img/topics/science.png","code":""},
-    {"id_topic":"anime","name_topic":"انيمي","img_url_topic":"http://logo.twoapistack.work/img/topics/anime.jpg","code":""},
-    {"id_topic":"roya","name_topic":"رؤيا","img_url_topic":"https://backend.roya-tv.com/imagechanger/Size01Q40R11/images/channels/iMoPuU3u5qnqMsL.png","code":""},
-    {"id_topic":"963","name_topic":"سوريا","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_sy.png","code":"sy"},
-    {"id_topic":"961","name_topic":"لبنان","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_lb.png","code":"lb"},
-    {"id_topic":"966","name_topic":"السعودية","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_sa.png","code":"sa"},
-    {"id_topic":"20","name_topic":"مصر","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_eg.png","code":"eg"},
-    {"id_topic":"971","name_topic":"الإمارات العربية المتحدة","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_ae.png","code":"ae"},
-    {"id_topic":"962","name_topic":"الأردن","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_jo.png","code":"jo"},
-    {"id_topic":"974","name_topic":"قطر","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_qa.png","code":"qa"},
-    {"id_topic":"964","name_topic":"العراق","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_iq.png","code":"iq"},
-    {"id_topic":"965","name_topic":"الكويت","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_kw.png","code":"kw"},
-    {"id_topic":"968","name_topic":"عُمان","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_om.png","code":"om"},
-    {"id_topic":"967","name_topic":"اليمن","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_ye.png","code":"ye"},
-    {"id_topic":"973","name_topic":"البحرين","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_bh.png","code":"bh"},
-    {"id_topic":"970","name_topic":"فلسطين","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_ps.png","code":"ps"},
-    {"id_topic":"249","name_topic":"السودان","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_sd.png","code":""},
-    {"id_topic":"216","name_topic":"تونس","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_tn.png","code":""},
-    {"id_topic":"212","name_topic":"المغرب","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_ma.png","code":""},
-    {"id_topic":"213","name_topic":"الجزائر","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_dz.png","code":""},
-    {"id_topic":"218","name_topic":"ليبيا","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_ly.png","code":""},
-    {"id_topic":"252","name_topic":"الصومال","img_url_topic":"http://logo.twoapistack.work/img/topics/ic_flag_so.png","code":""}
-];
-
-app.get("/get-all-topics", (req, res) => { res.json(allTopics); });
-
-app.listen(PORT, () => { console.log("🚀 Server running on port " + PORT); });
