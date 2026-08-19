@@ -848,18 +848,12 @@ app.get("/extract", async (req, res) => {
 app.get("/search", async (req, res) => {
     try {
         const query = req.query.q;
-        
-        // التحقق من وجود كلمة البحث
-        if (!query) {
-            return res.status(400).json({ error: true, message: "يرجى إرسال كلمة البحث (مثال: /search?q=bein)" });
-        }
-
         const cacheKey = `search_all_channels`;
         
-        // جلب وتجميع جميع القنوات من كل التصنيفات باستخدام الكاش لمنع الضغط على السيرفر الأساسي
+        // جلب وتجميع جميع القنوات من كل التصنيفات[cite: 1] باستخدام الكاش لمنع الضغط على السيرفر الأساسي
         const allChannels = await fetchWithCache(cacheKey, async () => {
             
-            // عمل طلبات متزامنة (Concurrent) لجميع الأقسام الموجودة في مصفوفة allTopics
+            // عمل طلبات متزامنة (Concurrent) لجميع الأقسام الموجودة في مصفوفة allTopics[cite: 1]
             const fetchPromises = allTopics.map(topicObj => {
                 const topic = topicObj.id_topic;
                 const topicCacheKey = `channels_${topic}`;
@@ -879,7 +873,7 @@ app.get("/search", async (req, res) => {
                     const encryptedBody = encryptAES(JSON.stringify(postData));
                     const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveByTopic", encryptedBody, {
                         headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
-                        timeout: 15000 // تقليل وقت الانتظار لتسريع البحث
+                        timeout: 15000
                     });
                     
                     const jsonResponse = JSON.parse(decryptAES(response.data));
@@ -891,35 +885,39 @@ app.get("/search", async (req, res) => {
                         img_url: ch.img_url || "", id_topic: ch.id_topic || topic
                     }));
                 }).catch(err => {
-                    // في حال فشل جلب قسم معين (timeout مثلاً)، نرجع مصفوفة فارغة لتجنب إيقاف باقي الطلبات
+                    // في حال فشل جلب قسم معين نرجع مصفوفة فارغة
                     return []; 
                 });
             });
 
-            // انتظار اكتمال جميع الطلبات
+            // انتظار اكتمال جميع الطلبات ودمجها في مصفوفة واحدة مسطحة
             const resultsArray = await Promise.all(fetchPromises);
-            
-            // دمج جميع المصفوفات (الأقسام) في مصفوفة واحدة مسطحة
             return resultsArray.flat(); 
         });
 
-        // فلترة القنوات بناءً على كلمة البحث (مع تجاهل حالة الأحرف)
+        // 1. حالة إذا كان البحث فارغاً (أو لم يتم إرسال q أصلاً)
+        if (!query || query.trim() === "") {
+            // أخذ نسخة من المصفوفة وخلطها عشوائياً
+            const shuffledChannels = [...allChannels].sort(() => 0.5 - Math.random());
+            // جلب أول 100 قناة فقط بعد الخلط
+            const random100 = shuffledChannels.slice(0, 100);
+            
+            // إرجاع المصفوفة مباشرة (هيكل بسيط)
+            return res.json(random100);
+        }
+
+        // 2. حالة إذا كان هناك كلمة بحث فعلية
         const searchResults = allChannels.filter(ch => 
             ch.name && ch.name.toLowerCase().includes(query.toLowerCase())
         );
 
-        res.json({
-            count: searchResults.length,
-            query: query,
-            results: searchResults
-        });
+        // إرجاع المصفوفة مباشرة (هيكل بسيط)
+        res.json(searchResults);
 
     } catch (error) { 
         res.status(500).json({ error: true, message: "حدث خطأ أثناء البحث: " + error.message }); 
     }
 });
-
-
 
 
 
