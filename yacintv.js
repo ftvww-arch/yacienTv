@@ -836,6 +836,99 @@ app.get("/extract", async (req, res) => {
     } catch (error) { res.status(500).json({ error: true, message: error.message }); }
 });
 
+
+
+
+
+
+
+// ==========================================
+// 🔍 مسار البحث عن القنوات في جميع التصنيفات
+// ==========================================
+app.get("/search", async (req, res) => {
+    try {
+        const query = req.query.q;
+        
+        // التحقق من وجود كلمة البحث
+        if (!query) {
+            return res.status(400).json({ error: true, message: "يرجى إرسال كلمة البحث (مثال: /search?q=bein)" });
+        }
+
+        const cacheKey = `search_all_channels`;
+        
+        // جلب وتجميع جميع القنوات من كل التصنيفات باستخدام الكاش لمنع الضغط على السيرفر الأساسي
+        const allChannels = await fetchWithCache(cacheKey, async () => {
+            
+            // عمل طلبات متزامنة (Concurrent) لجميع الأقسام الموجودة في مصفوفة allTopics
+            const fetchPromises = allTopics.map(topicObj => {
+                const topic = topicObj.id_topic;
+                const topicCacheKey = `channels_${topic}`;
+                
+                return fetchWithCache(topicCacheKey, async () => {
+                    const postData = {
+                        "user_id": "_82668_1785761367217_notloggedin.com_dramalive3", 
+                        "device_id": "e603540e-ed93-47a3-bec6-a15f7f056604",
+                        "device_api": "28", "version_name": "187", "language": "ar", "timezone": "Europe/Istanbul",
+                        "device_type": "phone", "KEY_ACTIVATED_TYPE": "232425", "store": "direct", "isStoreVersion": false,
+                        "isPremium": false, "isCoupon_active": false, "hideAds": false,
+                        "appCount": "{\"adsFailed\":73,\"adsLoaded\":56,\"adsShowed\":17,\"runCount\":8}",
+                        "mainServer": "http://main.eastgoessouth.online/api/live/livedrama/v13.0.0/", 
+                        "type": "tv", "topic": topic
+                    };
+                    
+                    const encryptedBody = encryptAES(JSON.stringify(postData));
+                    const response = await axios.post("http://live.1spbgmu.com/api/live/livedrama/v13.0.0/getLiveByTopic", encryptedBody, {
+                        headers: { "Content-Type": "text/plain", "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-S908E Build/TP1A.220624.014)", "Host": "live.1spbgmu.com", "Connection": "Keep-Alive" },
+                        timeout: 15000 // تقليل وقت الانتظار لتسريع البحث
+                    });
+                    
+                    const jsonResponse = JSON.parse(decryptAES(response.data));
+                    let rawChannels = Array.isArray(jsonResponse) ? jsonResponse : (jsonResponse.channels || jsonResponse.live || []);
+                    
+                    return rawChannels.map(ch => ({
+                        type: ch.type || "tv", id_live: ch.id_live || "", name: ch.name || "",
+                        url: ch.url || "", agent: ch.agent || "", backup: ch.backup || "",
+                        img_url: ch.img_url || "", id_topic: ch.id_topic || topic
+                    }));
+                }).catch(err => {
+                    // في حال فشل جلب قسم معين (timeout مثلاً)، نرجع مصفوفة فارغة لتجنب إيقاف باقي الطلبات
+                    return []; 
+                });
+            });
+
+            // انتظار اكتمال جميع الطلبات
+            const resultsArray = await Promise.all(fetchPromises);
+            
+            // دمج جميع المصفوفات (الأقسام) في مصفوفة واحدة مسطحة
+            return resultsArray.flat(); 
+        });
+
+        // فلترة القنوات بناءً على كلمة البحث (مع تجاهل حالة الأحرف)
+        const searchResults = allChannels.filter(ch => 
+            ch.name && ch.name.toLowerCase().includes(query.toLowerCase())
+        );
+
+        res.json({
+            count: searchResults.length,
+            query: query,
+            results: searchResults
+        });
+
+    } catch (error) { 
+        res.status(500).json({ error: true, message: "حدث خطأ أثناء البحث: " + error.message }); 
+    }
+});
+
+
+
+
+
+
+
+
+
+
+
 const allTopics = [
     {"id_topic":"hot_now","name_topic":"الأكثر مشاهدة","img_url_topic":"http://logo.twoapistack.work/img/topics/hot_now.png","code":""},
     {"id_topic":"alwan","name_topic":"الوان","img_url_topic":"http://logo.twoapistack.work/img/topics/alwan.jpg","code":""},
