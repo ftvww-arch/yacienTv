@@ -8,7 +8,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// متغير لحفظ بيانات البث
 let streamDataCache = {};
 
 // 1. مسار عرض المشغل
@@ -19,18 +18,17 @@ app.get('/play/:channel', async (req, res) => {
         
         console.log('جاري تحميل القناة:', channelId);
         
-        // جلب البيانات من الـ API الجديد
         const apiResponse = await axios.get(`https://s3-1nft.onrender.com/yacintv/stream`, {
             params: { id_live: channelId },
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json'
-            }
+            },
+            timeout: 15000
         });
         
         const responseData = apiResponse.data;
         
-        // التحقق من وجود بيانات
         if (!responseData || (Array.isArray(responseData) && responseData.length === 0)) {
             return res.status(400).send('لا توجد بيانات للقناة');
         }
@@ -47,12 +45,22 @@ app.get('/play/:channel', async (req, res) => {
             }
             
             try {
-                // فك تشفير البيانات
                 let innerData;
-                if (typeof serverData.data.url === 'string') {
-                    innerData = JSON.parse(serverData.data.url);
+                let rawUrl = serverData.data.url;
+                
+                // تنظيف الرابط من المسافات والتبويبات
+                if (typeof rawUrl === 'string') {
+                    rawUrl = rawUrl.trim();
+                    // إزالة التبويبات في البداية
+                    rawUrl = rawUrl.replace(/^\t+/, '');
+                    
+                    if (rawUrl.startsWith('{')) {
+                        innerData = JSON.parse(rawUrl);
+                    } else {
+                        innerData = { url: rawUrl };
+                    }
                 } else {
-                    innerData = serverData.data.url;
+                    innerData = rawUrl;
                 }
                 
                 const server = {
@@ -63,14 +71,13 @@ app.get('/play/:channel', async (req, res) => {
                     mediatype: innerData.mediatype || 'auto',
                     drm: innerData.drm || null,
                     swap: innerData.swap || null,
-                    acceptSSL: innerData.acceptSSL || '1',
-                    description: innerData.description || ''
+                    acceptSSL: innerData.acceptSSL || '1'
                 };
                 
                 servers.push(server);
-                console.log(`تم إضافة سيرفر ${i + 1}:`, server.name, '-', server.url);
+                console.log(`سيرفر ${i + 1}:`, server.name, '-', server.url);
             } catch (e) {
-                console.error(`خطأ في معالجة السيرفر ${i + 1}:`, e);
+                console.error(`خطأ في معالجة السيرفر ${i + 1}:`, e.message);
             }
         }
         
@@ -78,13 +85,12 @@ app.get('/play/:channel', async (req, res) => {
             return res.status(400).send('لا توجد سيرفرات صالحة');
         }
         
-        // حفظ البيانات
         streamDataCache[channelName] = {
             servers: servers,
             channelName: channelName
         };
         
-        // عرض صفحة المشغل
+        // صفحة المشغل
         res.send(`
             <!DOCTYPE html>
             <html lang="ar" dir="rtl">
@@ -93,12 +99,11 @@ app.get('/play/:channel', async (req, res) => {
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>مشغل ${channelName}</title>
                 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-                <script src="https://cdn.jsdelivr.net/npm/dashjs@latest"></script>
                 <style>
                     * { margin: 0; padding: 0; box-sizing: border-box; }
                     body { 
                         background: #000; 
-                        font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+                        font-family: Arial, sans-serif;
                         height: 100vh;
                         overflow: hidden;
                     }
@@ -144,27 +149,12 @@ app.get('/play/:channel', async (req, res) => {
                         cursor: pointer;
                         border-radius: 5px;
                         transition: all 0.3s;
-                        display: flex;
-                        align-items: center;
-                        gap: 10px;
                     }
                     .server-item:hover {
                         background: rgba(255,255,255,0.2);
                     }
                     .server-item.active {
                         background: #4CAF50;
-                    }
-                    .server-badge {
-                        background: #2196F3;
-                        padding: 2px 8px;
-                        border-radius: 10px;
-                        font-size: 11px;
-                    }
-                    .server-type {
-                        background: #FF9800;
-                        padding: 2px 8px;
-                        border-radius: 10px;
-                        font-size: 11px;
                     }
                     #controls {
                         position: absolute;
@@ -184,14 +174,9 @@ app.get('/play/:channel', async (req, res) => {
                         color: white;
                         cursor: pointer;
                         font-size: 24px;
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        transition: all 0.3s;
                     }
                     .btn:hover {
                         background: rgba(255,255,255,0.4);
-                        transform: scale(1.1);
                     }
                     #errorMsg {
                         position: absolute;
@@ -215,7 +200,7 @@ app.get('/play/:channel', async (req, res) => {
                     <div id="errorMsg"></div>
                     <div id="serverList"></div>
                     <div id="controls">
-                        <button class="btn" id="serversBtn" onclick="toggleServers()">📡</button>
+                        <button class="btn" onclick="toggleServers()">📡</button>
                         <button class="btn" onclick="togglePlay()">⏯</button>
                         <button class="btn" onclick="reloadVideo()">🔄</button>
                     </div>
@@ -227,7 +212,6 @@ app.get('/play/:channel', async (req, res) => {
                     const errorMsg = document.getElementById('errorMsg');
                     const serverListEl = document.getElementById('serverList');
                     let hls = null;
-                    let dashPlayer = null;
                     let currentServerIndex = 0;
                     let servers = [];
                     
@@ -245,11 +229,6 @@ app.get('/play/:channel', async (req, res) => {
                         errorMsg.style.display = 'block';
                     }
                     
-                    function hideError() {
-                        errorMsg.style.display = 'none';
-                    }
-                    
-                    // تحميل السيرفرات
                     async function loadServers() {
                         try {
                             const response = await fetch('/get-servers/${channelName}');
@@ -264,34 +243,20 @@ app.get('/play/:channel', async (req, res) => {
                             updateServerList();
                             playServer(0);
                         } catch (error) {
-                            console.error('خطأ في تحميل السيرفرات:', error);
                             showError('فشل في تحميل السيرفرات');
                         }
                     }
                     
-                    // تحديث قائمة السيرفرات
                     function updateServerList() {
                         serverListEl.innerHTML = '';
-                        
                         servers.forEach((server, index) => {
                             const div = document.createElement('div');
                             div.className = 'server-item' + (index === currentServerIndex ? ' active' : '');
-                            
-                            const typeBadge = server.mediatype === 'dash' ? 
-                                '<span class="server-type">DASH</span>' : 
-                                server.mediatype === 'hls' ? 
-                                '<span class="server-type">HLS</span>' : '';
-                            
-                            const drmBadge = server.drm ? 
-                                '<span class="server-badge">DRM</span>' : '';
-                            
-                            div.innerHTML = '<span>' + server.name + '</span>' + typeBadge + drmBadge;
-                            
+                            div.textContent = server.name;
                             div.onclick = () => {
                                 playServer(index);
                                 serverListEl.style.display = 'none';
                             };
-                            
                             serverListEl.appendChild(div);
                         });
                     }
@@ -300,8 +265,7 @@ app.get('/play/:channel', async (req, res) => {
                         serverListEl.style.display = serverListEl.style.display === 'block' ? 'none' : 'block';
                     }
                     
-                    // تشغيل سيرفر
-                    async function playServer(index) {
+                    function playServer(index) {
                         if (index >= servers.length) {
                             showError('لا توجد سيرفرات متاحة');
                             return;
@@ -310,86 +274,49 @@ app.get('/play/:channel', async (req, res) => {
                         currentServerIndex = index;
                         updateServerList();
                         showStatus('جاري تشغيل ' + servers[index].name + '...');
-                        hideError();
                         
-                        // تنظيف المشغلات السابقة
                         if (hls) {
                             hls.destroy();
                             hls = null;
                         }
-                        if (dashPlayer) {
-                            dashPlayer.reset();
-                            dashPlayer = null;
-                        }
                         
-                        const server = servers[index];
                         const proxyUrl = '/proxy-stream/${channelName}?server=' + index;
                         
-                        try {
-                            if (server.mediatype === 'dash' || server.url.includes('.mpd')) {
-                                // تشغيل DASH
-                                dashPlayer = dashjs.MediaPlayer().create();
-                                dashPlayer.initialize(video, proxyUrl, true);
-                                
-                                // دعم DRM
-                                if (server.drm && server.drm.clearkey) {
-                                    const [keyId, key] = server.drm.clearkey.split(':');
-                                    dashPlayer.setProtectionData({
-                                        'org.w3.clearkey': {
-                                            serverURL: '',
-                                            clearkeys: {
-                                                [keyId]: key
-                                            }
-                                        }
-                                    });
+                        if (Hls.isSupported()) {
+                            hls = new Hls({
+                                enableWorker: true,
+                                lowLatencyMode: true,
+                                backBufferLength: 90,
+                                maxBufferLength: 30,
+                                manifestLoadingTimeOut: 20000,
+                                levelLoadingTimeOut: 20000,
+                                fragLoadingTimeOut: 20000,
+                                xhrSetup: function(xhr, url) {
+                                    xhr.withCredentials = false;
                                 }
-                                
-                                video.play().then(() => {
-                                    hideStatus();
-                                }).catch(e => {
-                                    console.log('خطأ في التشغيل التلقائي:', e);
-                                });
-                            } else {
-                                // تشغيل HLS
-                                if (Hls.isSupported()) {
-                                    hls = new Hls({
-                                        enableWorker: true,
-                                        lowLatencyMode: true,
-                                        backBufferLength: 90,
-                                        maxBufferLength: 30,
-                                        manifestLoadingTimeOut: 20000,
-                                        levelLoadingTimeOut: 20000,
-                                        fragLoadingTimeOut: 20000
-                                    });
-                                    
-                                    hls.loadSource(proxyUrl);
-                                    hls.attachMedia(video);
-                                    
-                                    hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                                        hideStatus();
-                                        video.play().catch(e => console.log('خطأ في التشغيل:', e));
-                                    });
-                                    
-                                    hls.on(Hls.Events.ERROR, function(event, data) {
-                                        console.error('خطأ HLS:', data);
-                                        if (data.fatal) {
-                                            showError('فشل تشغيل السيرفر، جاري تجربة سيرفر آخر...');
-                                            setTimeout(() => {
-                                                playServer(index + 1);
-                                            }, 2000);
-                                        }
-                                    });
-                                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                                    video.src = proxyUrl;
-                                    video.addEventListener('loadedmetadata', function() {
-                                        hideStatus();
-                                        video.play();
-                                    });
+                            });
+                            
+                            hls.loadSource(proxyUrl);
+                            hls.attachMedia(video);
+                            
+                            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                hideStatus();
+                                video.play().catch(e => console.log('خطأ في التشغيل:', e));
+                            });
+                            
+                            hls.on(Hls.Events.ERROR, function(event, data) {
+                                console.error('خطأ HLS:', data);
+                                if (data.fatal) {
+                                    showError('فشل تشغيل السيرفر، جاري تجربة سيرفر آخر...');
+                                    setTimeout(() => playServer(index + 1), 2000);
                                 }
-                            }
-                        } catch (error) {
-                            console.error('خطأ في التشغيل:', error);
-                            showError('فشل في تشغيل السيرفر: ' + error.message);
+                            });
+                        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                            video.src = proxyUrl;
+                            video.addEventListener('loadedmetadata', function() {
+                                hideStatus();
+                                video.play();
+                            });
                         }
                     }
                     
@@ -405,7 +332,6 @@ app.get('/play/:channel', async (req, res) => {
                         playServer(currentServerIndex);
                     }
                     
-                    // بدء التشغيل
                     loadServers();
                 </script>
             </body>
@@ -445,9 +371,7 @@ app.get('/proxy-stream/:channel', async (req, res) => {
     try {
         console.log('بروكسي السيرفر:', server.name);
         console.log('الرابط:', server.url);
-        console.log('النوع:', server.mediatype);
         
-        // بناء الهيدرز
         const headers = {
             'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
             'Accept': '*/*',
@@ -455,14 +379,11 @@ app.get('/proxy-stream/:channel', async (req, res) => {
             'Connection': 'keep-alive'
         };
         
-        // إضافة الهيدرز المخصصة
         if (server.headers) {
             Object.keys(server.headers).forEach(key => {
                 headers[key] = server.headers[key];
             });
         }
-        
-        console.log('الهيدرز:', JSON.stringify(headers));
         
         // جلب البث
         const response = await axios({
@@ -480,16 +401,27 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         console.log('استجابة المصدر:', response.status);
         console.log('نوع المحتوى:', response.headers['content-type']);
         
-        // تمرير الهيدرز
-        const contentType = response.headers['content-type'] || 
-            (server.mediatype === 'dash' ? 'application/dash+xml' : 'application/vnd.apple.mpegurl');
+        // تحديد نوع المحتوى
+        let contentType = response.headers['content-type'] || '';
+        
+        // إذا كان الرابط ينتهي بـ .html أو .m3u8 أو يحتوي على playlist
+        const isHlsUrl = server.url.includes('.m3u8') || 
+                        server.url.includes('.html') || 
+                        server.url.includes('playlist') ||
+                        server.mediatype === 'hls' ||
+                        contentType.includes('mpegurl') ||
+                        contentType.includes('x-mpegurl');
+        
+        if (isHlsUrl) {
+            contentType = 'application/vnd.apple.mpegurl';
+        }
         
         res.setHeader('Content-Type', contentType);
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache');
         
-        // معالجة ملفات المانيفست
-        if (contentType.includes('mpegurl') || server.url.includes('.m3u8') || server.mediatype === 'hls') {
+        // معالجة ملفات HLS
+        if (isHlsUrl) {
             let data = '';
             
             response.data.on('data', chunk => {
@@ -497,61 +429,75 @@ app.get('/proxy-stream/:channel', async (req, res) => {
             });
             
             response.data.on('end', () => {
-                console.log('تم استلام ملف HLS');
+                console.log('تم استلام ملف HLS/HTML');
+                console.log('المحتوى:', data.substring(0, 300));
                 
-                const baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
-                let modifiedData = data;
+                // تحديد الرابط الأساسي
+                let baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
                 
-                // تعديل الروابط
-                modifiedData = modifiedData.replace(/^(?!#)(.*\.(?:ts|m3u8|m4s|mp4|aac|vtt).*)$/gm, (match) => {
-                    let fullUrl;
-                    if (match.startsWith('http')) {
-                        fullUrl = match;
-                    } else {
-                        fullUrl = baseUrl + match;
-                    }
+                // معالجة خاصة لملفات .html التي تحتوي على playlists
+                if (server.url.endsWith('.html') || data.includes('playlist')) {
+                    // تحويل الروابط النسبية
+                    let modifiedData = data;
                     
-                    const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                    return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
-                });
-                
-                // تعديل روابط EXT-X-KEY
-                modifiedData = modifiedData.replace(/URI="([^"]+)"/g, (match, uri) => {
-                    if (!uri.startsWith('http') && !uri.startsWith('data:')) {
-                        const fullUri = baseUrl + uri;
+                    // تعديل الروابط في الملف
+                    modifiedData = modifiedData.replace(/(?:^|\s)(v\d+\/playlist\.html|[\w\-\.\/]+\.m3u8|[\w\-\.\/]+\.ts)/gm, (match) => {
+                        const cleanMatch = match.trim();
+                        let fullUrl;
+                        
+                        if (cleanMatch.startsWith('http')) {
+                            fullUrl = cleanMatch;
+                        } else {
+                            fullUrl = baseUrl + cleanMatch;
+                        }
+                        
                         const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                        return 'URI="/media-proxy/${channelName}?url=' + encodeURIComponent(fullUri) + '&headers=' + encodedHeaders + '"';
-                    }
-                    return match;
-                });
-                
-                res.send(modifiedData);
-            });
-        } else if (contentType.includes('dash') || server.url.includes('.mpd') || server.mediatype === 'dash') {
-            // لملفات DASH
-            let data = '';
-            
-            response.data.on('data', chunk => {
-                data += chunk.toString();
-            });
-            
-            response.data.on('end', () => {
-                console.log('تم استلام ملف DASH');
-                
-                const baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
-                let modifiedData = data;
-                
-                // تعديل الروابط في ملفات DASH
-                modifiedData = modifiedData.replace(/(?:src|href)="([^"]+)"/g, (match, url) => {
-                    if (!url.startsWith('http') && !url.startsWith('data:') && !url.startsWith('#')) {
-                        const fullUrl = baseUrl + url;
+                        return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
+                    });
+                    
+                    // تعديل الروابط في EXT-X-STREAM-INF
+                    modifiedData = modifiedData.replace(/^(?!.*#)(.*)$/gm, (match) => {
+                        if (match.trim() && !match.startsWith('#') && !match.startsWith('/media-proxy')) {
+                            let fullUrl;
+                            if (match.startsWith('http')) {
+                                fullUrl = match.trim();
+                            } else {
+                                fullUrl = baseUrl + match.trim();
+                            }
+                            
+                            const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
+                            return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
+                        }
+                        return match;
+                    });
+                    
+                    res.send(modifiedData);
+                } else {
+                    // معالجة ملفات m3u8 العادية
+                    const modifiedData = data.replace(/^(?!#)(.*\.(?:ts|m3u8|m4s|mp4|aac|vtt|html).*)$/gm, (match) => {
+                        let fullUrl;
+                        if (match.startsWith('http')) {
+                            fullUrl = match;
+                        } else {
+                            fullUrl = baseUrl + match;
+                        }
+                        
                         const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                        return match.replace(url, '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders);
-                    }
-                    return match;
-                });
-                
-                res.send(modifiedData);
+                        return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
+                    });
+                    
+                    // تعديل EXT-X-KEY
+                    const finalData = modifiedData.replace(/URI="([^"]+)"/g, (match, uri) => {
+                        if (!uri.startsWith('http') && !uri.startsWith('data:')) {
+                            const fullUri = baseUrl + uri;
+                            const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
+                            return 'URI="/media-proxy/${channelName}?url=' + encodeURIComponent(fullUri) + '&headers=' + encodedHeaders + '"';
+                        }
+                        return match;
+                    });
+                    
+                    res.send(finalData);
+                }
             });
         } else {
             // للبث المباشر
@@ -589,6 +535,8 @@ app.get('/media-proxy/:channel', async (req, res) => {
     }
     
     try {
+        console.log('جلب ملف:', targetUrl);
+        
         const response = await axios({
             method: 'get',
             url: targetUrl,
@@ -598,10 +546,49 @@ app.get('/media-proxy/:channel', async (req, res) => {
             maxRedirects: 10
         });
         
-        res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        // تحديد نوع المحتوى
+        let contentType = response.headers['content-type'] || 'application/octet-stream';
         
-        response.data.pipe(res);
+        // إذا كان الملف m3u8 أو html
+        if (targetUrl.includes('.m3u8') || targetUrl.includes('.html') || targetUrl.includes('playlist')) {
+            contentType = 'application/vnd.apple.mpegurl';
+            
+            // معالجة الملف
+            let data = '';
+            
+            response.data.on('data', chunk => {
+                data += chunk.toString();
+            });
+            
+            response.data.on('end', () => {
+                const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+                
+                // تعديل الروابط
+                const modifiedData = data.replace(/^(?!#)(.*)$/gm, (match) => {
+                    if (match.trim() && !match.startsWith('#') && !match.startsWith('/media-proxy')) {
+                        let fullUrl;
+                        if (match.startsWith('http')) {
+                            fullUrl = match.trim();
+                        } else {
+                            fullUrl = baseUrl + match.trim();
+                        }
+                        
+                        const encodedHeaders = encodeURIComponent(JSON.stringify(headersData));
+                        return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
+                    }
+                    return match;
+                });
+                
+                res.setHeader('Content-Type', contentType);
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.send(modifiedData);
+            });
+        } else {
+            // للملفات العادية
+            res.setHeader('Content-Type', contentType);
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            response.data.pipe(res);
+        }
         
         response.data.on('error', (err) => {
             console.error('خطأ في الملف:', err);
@@ -627,13 +614,38 @@ app.get('/test/:channel', async (req, res) => {
             headers: {
                 'User-Agent': 'Mozilla/5.0',
                 'Accept': 'application/json'
-            }
+            },
+            timeout: 15000
         });
+        
+        // معالجة البيانات لعرضها
+        const servers = [];
+        const dataArray = Array.isArray(apiResponse.data) ? apiResponse.data : [apiResponse.data];
+        
+        for (const serverData of dataArray) {
+            if (serverData.result === 0 && serverData.data) {
+                try {
+                    let rawUrl = serverData.data.url;
+                    if (typeof rawUrl === 'string') {
+                        rawUrl = rawUrl.trim().replace(/^\t+/, '');
+                    }
+                    
+                    servers.push({
+                        name: serverData.name,
+                        url: rawUrl,
+                        agent: serverData.data.agent
+                    });
+                } catch (e) {
+                    console.error('خطأ:', e);
+                }
+            }
+        }
         
         res.json({
             success: true,
-            data: apiResponse.data,
-            channelId: channelId
+            channelId: channelId,
+            serversCount: servers.length,
+            servers: servers
         });
     } catch (error) {
         res.json({
