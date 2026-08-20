@@ -48,11 +48,8 @@ app.get('/play/:channel', async (req, res) => {
                 let innerData;
                 let rawUrl = serverData.data.url;
                 
-                // تنظيف الرابط من المسافات والتبويبات
                 if (typeof rawUrl === 'string') {
-                    rawUrl = rawUrl.trim();
-                    // إزالة التبويبات في البداية
-                    rawUrl = rawUrl.replace(/^\t+/, '');
+                    rawUrl = rawUrl.trim().replace(/^\t+/, '');
                     
                     if (rawUrl.startsWith('{')) {
                         innerData = JSON.parse(rawUrl);
@@ -290,10 +287,7 @@ app.get('/play/:channel', async (req, res) => {
                                 maxBufferLength: 30,
                                 manifestLoadingTimeOut: 20000,
                                 levelLoadingTimeOut: 20000,
-                                fragLoadingTimeOut: 20000,
-                                xhrSetup: function(xhr, url) {
-                                    xhr.withCredentials = false;
-                                }
+                                fragLoadingTimeOut: 20000
                             });
                             
                             hls.loadSource(proxyUrl);
@@ -356,7 +350,7 @@ app.get('/get-servers/:channel', (req, res) => {
     res.json({ servers: streamInfo.servers });
 });
 
-// 3. مسار البروكسي للبث
+// 3. مسار البروكسي - يتعامل مع جميع أنواع الروابط مثل ExoPlayer
 app.get('/proxy-stream/:channel', async (req, res) => {
     const channelName = req.params.channel;
     const serverIndex = parseInt(req.query.server) || 0;
@@ -372,6 +366,7 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         console.log('بروكسي السيرفر:', server.name);
         console.log('الرابط:', server.url);
         
+        // بناء الهيدرز مثل ExoPlayer
         const headers = {
             'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
             'Accept': '*/*',
@@ -385,10 +380,23 @@ app.get('/proxy-stream/:channel', async (req, res) => {
             });
         }
         
+        // تطبيق swap إذا وجد
+        let finalUrl = server.url;
+        if (server.swap) {
+            const swapKey = Object.keys(server.swap)[0];
+            const swapValue = server.swap[swapKey];
+            if (swapKey && finalUrl.includes(swapKey)) {
+                finalUrl = finalUrl.replace(swapKey, swapValue);
+            }
+        }
+        
+        console.log('الرابط النهائي:', finalUrl);
+        console.log('الهيدرز:', JSON.stringify(headers));
+        
         // جلب البث
         const response = await axios({
             method: 'get',
-            url: server.url,
+            url: finalUrl,
             headers: headers,
             responseType: 'stream',
             timeout: 30000,
@@ -404,10 +412,10 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         // تحديد نوع المحتوى
         let contentType = response.headers['content-type'] || '';
         
-        // إذا كان الرابط ينتهي بـ .html أو .m3u8 أو يحتوي على playlist
-        const isHlsUrl = server.url.includes('.m3u8') || 
-                        server.url.includes('.html') || 
-                        server.url.includes('playlist') ||
+        // إذا كان الرابط ينتهي بـ .m3u8 أو .html
+        const isHlsUrl = finalUrl.includes('.m3u8') || 
+                        finalUrl.includes('.html') || 
+                        finalUrl.includes('playlist') ||
                         server.mediatype === 'hls' ||
                         contentType.includes('mpegurl') ||
                         contentType.includes('x-mpegurl');
@@ -419,90 +427,64 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         res.setHeader('Content-Type', contentType);
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Access-Control-Allow-Headers', '*');
         
-        // معالجة ملفات HLS
-        if (isHlsUrl) {
-            let data = '';
+        // جمع البيانات
+        let data = '';
+        
+        response.data.on('data', chunk => {
+            data += chunk.toString();
+        });
+        
+        response.data.on('end', () => {
+            console.log('تم استلام البيانات، الحجم:', data.length);
+            console.log('أول 500 حرف:', data.substring(0, 500));
             
-            response.data.on('data', chunk => {
-                data += chunk.toString();
-            });
+            // تحديد الرابط الأساسي
+            const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
             
-            response.data.on('end', () => {
-                console.log('تم استلام ملف HLS/HTML');
-                console.log('المحتوى:', data.substring(0, 300));
+            // معالجة الروابط في الملف
+            let modifiedData = data;
+            
+            // تعديل جميع الروابط النسبية والمطلقة
+            modifiedData = modifiedData.replace(/^(?!#)(.*)$/gm, (match) => {
+                const trimmedMatch = match.trim();
                 
-                // تحديد الرابط الأساسي
-                let baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
-                
-                // معالجة خاصة لملفات .html التي تحتوي على playlists
-                if (server.url.endsWith('.html') || data.includes('playlist')) {
-                    // تحويل الروابط النسبية
-                    let modifiedData = data;
-                    
-                    // تعديل الروابط في الملف
-                    modifiedData = modifiedData.replace(/(?:^|\s)(v\d+\/playlist\.html|[\w\-\.\/]+\.m3u8|[\w\-\.\/]+\.ts)/gm, (match) => {
-                        const cleanMatch = match.trim();
-                        let fullUrl;
-                        
-                        if (cleanMatch.startsWith('http')) {
-                            fullUrl = cleanMatch;
-                        } else {
-                            fullUrl = baseUrl + cleanMatch;
-                        }
-                        
-                        const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                        return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
-                    });
-                    
-                    // تعديل الروابط في EXT-X-STREAM-INF
-                    modifiedData = modifiedData.replace(/^(?!.*#)(.*)$/gm, (match) => {
-                        if (match.trim() && !match.startsWith('#') && !match.startsWith('/media-proxy')) {
-                            let fullUrl;
-                            if (match.startsWith('http')) {
-                                fullUrl = match.trim();
-                            } else {
-                                fullUrl = baseUrl + match.trim();
-                            }
-                            
-                            const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                            return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
-                        }
-                        return match;
-                    });
-                    
-                    res.send(modifiedData);
-                } else {
-                    // معالجة ملفات m3u8 العادية
-                    const modifiedData = data.replace(/^(?!#)(.*\.(?:ts|m3u8|m4s|mp4|aac|vtt|html).*)$/gm, (match) => {
-                        let fullUrl;
-                        if (match.startsWith('http')) {
-                            fullUrl = match;
-                        } else {
-                            fullUrl = baseUrl + match;
-                        }
-                        
-                        const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                        return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
-                    });
-                    
-                    // تعديل EXT-X-KEY
-                    const finalData = modifiedData.replace(/URI="([^"]+)"/g, (match, uri) => {
-                        if (!uri.startsWith('http') && !uri.startsWith('data:')) {
-                            const fullUri = baseUrl + uri;
-                            const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                            return 'URI="/media-proxy/${channelName}?url=' + encodeURIComponent(fullUri) + '&headers=' + encodedHeaders + '"';
-                        }
-                        return match;
-                    });
-                    
-                    res.send(finalData);
+                // تجاهل الأسطر الفارغة والتعليقات
+                if (!trimmedMatch || trimmedMatch.startsWith('#')) {
+                    return match;
                 }
+                
+                // تجاهل الروابط التي تم تعديلها بالفعل
+                if (trimmedMatch.startsWith('/media-proxy') || trimmedMatch.startsWith('data:')) {
+                    return match;
+                }
+                
+                // بناء الرابط الكامل
+                let fullUrl;
+                if (trimmedMatch.startsWith('http://') || trimmedMatch.startsWith('https://')) {
+                    fullUrl = trimmedMatch;
+                } else {
+                    fullUrl = baseUrl + trimmedMatch;
+                }
+                
+                const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
+                return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
             });
-        } else {
-            // للبث المباشر
-            response.data.pipe(res);
-        }
+            
+            // تعديل روابط EXT-X-KEY
+            modifiedData = modifiedData.replace(/URI="([^"]+)"/g, (match, uri) => {
+                if (!uri.startsWith('http') && !uri.startsWith('data:') && !uri.startsWith('/media-proxy')) {
+                    const fullUri = baseUrl + uri;
+                    const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
+                    return 'URI="/media-proxy/${channelName}?url=' + encodeURIComponent(fullUri) + '&headers=' + encodedHeaders + '"';
+                }
+                return match;
+            });
+            
+            console.log('تم تعديل البيانات');
+            res.send(modifiedData);
+        });
         
         response.data.on('error', (err) => {
             console.error('خطأ في البث:', err);
@@ -565,18 +547,21 @@ app.get('/media-proxy/:channel', async (req, res) => {
                 
                 // تعديل الروابط
                 const modifiedData = data.replace(/^(?!#)(.*)$/gm, (match) => {
-                    if (match.trim() && !match.startsWith('#') && !match.startsWith('/media-proxy')) {
-                        let fullUrl;
-                        if (match.startsWith('http')) {
-                            fullUrl = match.trim();
-                        } else {
-                            fullUrl = baseUrl + match.trim();
-                        }
-                        
-                        const encodedHeaders = encodeURIComponent(JSON.stringify(headersData));
-                        return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
+                    const trimmedMatch = match.trim();
+                    
+                    if (!trimmedMatch || trimmedMatch.startsWith('#') || trimmedMatch.startsWith('/media-proxy') || trimmedMatch.startsWith('data:')) {
+                        return match;
                     }
-                    return match;
+                    
+                    let fullUrl;
+                    if (trimmedMatch.startsWith('http://') || trimmedMatch.startsWith('https://')) {
+                        fullUrl = trimmedMatch;
+                    } else {
+                        fullUrl = baseUrl + trimmedMatch;
+                    }
+                    
+                    const encodedHeaders = encodeURIComponent(JSON.stringify(headersData));
+                    return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
                 });
                 
                 res.setHeader('Content-Type', contentType);
@@ -584,7 +569,7 @@ app.get('/media-proxy/:channel', async (req, res) => {
                 res.send(modifiedData);
             });
         } else {
-            // للملفات العادية
+            // للملفات العادية (ts, m4s, etc)
             res.setHeader('Content-Type', contentType);
             res.setHeader('Access-Control-Allow-Origin', '*');
             response.data.pipe(res);
@@ -618,34 +603,10 @@ app.get('/test/:channel', async (req, res) => {
             timeout: 15000
         });
         
-        // معالجة البيانات لعرضها
-        const servers = [];
-        const dataArray = Array.isArray(apiResponse.data) ? apiResponse.data : [apiResponse.data];
-        
-        for (const serverData of dataArray) {
-            if (serverData.result === 0 && serverData.data) {
-                try {
-                    let rawUrl = serverData.data.url;
-                    if (typeof rawUrl === 'string') {
-                        rawUrl = rawUrl.trim().replace(/^\t+/, '');
-                    }
-                    
-                    servers.push({
-                        name: serverData.name,
-                        url: rawUrl,
-                        agent: serverData.data.agent
-                    });
-                } catch (e) {
-                    console.error('خطأ:', e);
-                }
-            }
-        }
-        
         res.json({
             success: true,
             channelId: channelId,
-            serversCount: servers.length,
-            servers: servers
+            data: apiResponse.data
         });
     } catch (error) {
         res.json({
