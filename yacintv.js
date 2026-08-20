@@ -10,7 +10,7 @@ app.use(express.json());
 
 let streamDataCache = {};
 
-// 1. مسار عرض المشغل
+// 1. مسار عرض المشغل - يعرض البيانات مباشرة
 app.get('/play/:channel', async (req, res) => {
     try {
         const channelName = req.params.channel;
@@ -71,9 +71,6 @@ app.get('/play/:channel', async (req, res) => {
                 };
                 
                 servers.push(server);
-                console.log(`سيرفر ${i + 1}:`, server.name);
-                console.log('الرابط:', server.url);
-                console.log('الـ swap:', JSON.stringify(server.swap));
             } catch (e) {
                 console.error(`خطأ في معالجة السيرفر ${i + 1}:`, e.message);
             }
@@ -83,12 +80,10 @@ app.get('/play/:channel', async (req, res) => {
             return res.status(400).send('لا توجد سيرفرات صالحة');
         }
         
-        streamDataCache[channelName] = {
-            servers: servers,
-            channelName: channelName
-        };
+        // حفظ البيانات
+        streamDataCache[channelName] = { servers };
         
-        // صفحة المشغل
+        // إرسال صفحة مع بيانات السيرفرات مباشرة
         res.send(`
             <!DOCTYPE html>
             <html lang="ar" dir="rtl">
@@ -211,7 +206,9 @@ app.get('/play/:channel', async (req, res) => {
                     const serverListEl = document.getElementById('serverList');
                     let hls = null;
                     let currentServerIndex = 0;
-                    let servers = [];
+                    
+                    // بيانات السيرفرات مباشرة
+                    const servers = ${JSON.stringify(servers)};
                     
                     function showStatus(msg) {
                         status.textContent = msg;
@@ -225,24 +222,6 @@ app.get('/play/:channel', async (req, res) => {
                     function showError(msg) {
                         errorMsg.innerHTML = msg;
                         errorMsg.style.display = 'block';
-                    }
-                    
-                    async function loadServers() {
-                        try {
-                            const response = await fetch('/get-servers/${channelName}');
-                            const data = await response.json();
-                            servers = data.servers || [];
-                            
-                            if (servers.length === 0) {
-                                showError('لا توجد سيرفرات متاحة');
-                                return;
-                            }
-                            
-                            updateServerList();
-                            playServer(0);
-                        } catch (error) {
-                            showError('فشل في تحميل السيرفرات');
-                        }
                     }
                     
                     function updateServerList() {
@@ -278,41 +257,90 @@ app.get('/play/:channel', async (req, res) => {
                             hls = null;
                         }
                         
-                        const proxyUrl = '/proxy-stream/${channelName}?server=' + index;
+                        const server = servers[index];
                         
-                        if (Hls.isSupported()) {
-                            hls = new Hls({
-                                enableWorker: true,
-                                lowLatencyMode: true,
-                                backBufferLength: 90,
-                                maxBufferLength: 30,
-                                manifestLoadingTimeOut: 20000,
-                                levelLoadingTimeOut: 20000,
-                                fragLoadingTimeOut: 20000
-                            });
-                            
-                            hls.loadSource(proxyUrl);
-                            hls.attachMedia(video);
-                            
-                            hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                                hideStatus();
-                                video.play().catch(e => console.log('خطأ في التشغيل:', e));
-                            });
-                            
-                            hls.on(Hls.Events.ERROR, function(event, data) {
-                                console.error('خطأ HLS:', data);
-                                if (data.fatal) {
-                                    showError('فشل تشغيل السيرفر، جاري تجربة سيرفر آخر...');
-                                    setTimeout(() => playServer(index + 1), 2000);
-                                }
-                            });
-                        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                            video.src = proxyUrl;
-                            video.addEventListener('loadedmetadata', function() {
-                                hideStatus();
-                                video.play();
-                            });
+                        // تطبيق swap
+                        let finalUrl = server.url;
+                        let swapKey = '';
+                        let swapValue = '';
+                        
+                        if (server.swap) {
+                            swapKey = Object.keys(server.swap)[0];
+                            swapValue = server.swap[swapKey];
                         }
+                        
+                        // إنشاء blob URL للـ m3u8 المعدل
+                        fetch(server.url, {
+                            headers: server.headers || {}
+                        })
+                        .then(response => response.text())
+                        .then(data => {
+                            // تحديد الرابط الأساسي
+                            const baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
+                            
+                            // تعديل الروابط مع تطبيق swap
+                            const modifiedData = data.replace(/^(?!#)(.*)$/gm, (match) => {
+                                const trimmedMatch = match.trim();
+                                
+                                if (!trimmedMatch || trimmedMatch.startsWith('#')) {
+                                    return match;
+                                }
+                                
+                                let fullUrl;
+                                if (trimmedMatch.startsWith('http://') || trimmedMatch.startsWith('https://')) {
+                                    fullUrl = trimmedMatch;
+                                } else {
+                                    fullUrl = baseUrl + trimmedMatch;
+                                }
+                                
+                                // تطبيق swap
+                                if (swapKey && fullUrl.includes(swapKey)) {
+                                    fullUrl = fullUrl.replace(swapKey, swapValue);
+                                }
+                                
+                                return fullUrl;
+                            });
+                            
+                            // إنشاء Blob URL
+                            const blob = new Blob([modifiedData], { type: 'application/vnd.apple.mpegurl' });
+                            const blobUrl = URL.createObjectURL(blob);
+                            
+                            // تشغيل HLS مع XHR مخصص للهيدرز
+                            if (Hls.isSupported()) {
+                                hls = new Hls({
+                                    enableWorker: true,
+                                    lowLatencyMode: true,
+                                    xhrSetup: function(xhr, url) {
+                                        // إضافة الهيدرز للطلبات
+                                        if (server.headers) {
+                                            Object.keys(server.headers).forEach(key => {
+                                                xhr.setRequestHeader(key, server.headers[key]);
+                                            });
+                                        }
+                                    }
+                                });
+                                
+                                hls.loadSource(blobUrl);
+                                hls.attachMedia(video);
+                                
+                                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                    hideStatus();
+                                    video.play().catch(e => console.log('خطأ في التشغيل:', e));
+                                });
+                                
+                                hls.on(Hls.Events.ERROR, function(event, data) {
+                                    console.error('خطأ HLS:', data);
+                                    if (data.fatal) {
+                                        showError('فشل تشغيل السيرفر، جاري تجربة سيرفر آخر...');
+                                        setTimeout(() => playServer(index + 1), 2000);
+                                    }
+                                });
+                            }
+                        })
+                        .catch(error => {
+                            console.error('خطأ في جلب المانيفست:', error);
+                            showError('فشل في جلب البيانات');
+                        });
                     }
                     
                     function togglePlay() {
@@ -327,7 +355,9 @@ app.get('/play/:channel', async (req, res) => {
                         playServer(currentServerIndex);
                     }
                     
-                    loadServers();
+                    // بدء التشغيل
+                    updateServerList();
+                    playServer(0);
                 </script>
             </body>
             </html>
@@ -336,274 +366,6 @@ app.get('/play/:channel', async (req, res) => {
     } catch (error) {
         console.error('خطأ:', error);
         res.status(500).send('حدث خطأ: ' + error.message);
-    }
-});
-
-// 2. مسار جلب السيرفرات
-app.get('/get-servers/:channel', (req, res) => {
-    const channelName = req.params.channel;
-    const streamInfo = streamDataCache[channelName];
-    
-    if (!streamInfo) {
-        return res.json({ servers: [] });
-    }
-    
-    res.json({ servers: streamInfo.servers });
-});
-
-// 3. مسار البروكسي - مع دعم swap و .js files
-app.get('/proxy-stream/:channel', async (req, res) => {
-    const channelName = req.params.channel;
-    const serverIndex = parseInt(req.query.server) || 0;
-    const streamInfo = streamDataCache[channelName];
-    
-    if (!streamInfo || !streamInfo.servers[serverIndex]) {
-        return res.status(404).send('السيرفر غير متوفر');
-    }
-    
-    const server = streamInfo.servers[serverIndex];
-    
-    try {
-        console.log('=== بدء البروكسي ===');
-        console.log('السيرفر:', server.name);
-        console.log('الرابط:', server.url);
-        
-        // بناء الهيدرز
-        const headers = {
-            'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive'
-        };
-        
-        if (server.headers['Referer']) {
-            headers['Referer'] = server.headers['Referer'];
-        }
-        
-        if (server.headers['Origin']) {
-            headers['Origin'] = server.headers['Origin'];
-        }
-        
-        if (server.headers) {
-            Object.keys(server.headers).forEach(key => {
-                if (!headers[key]) {
-                    headers[key] = server.headers[key];
-                }
-            });
-        }
-        
-        // تطبيق swap
-        let finalUrl = server.url;
-        let swapKey = '';
-        let swapValue = '';
-        
-        if (server.swap) {
-            swapKey = Object.keys(server.swap)[0];
-            swapValue = server.swap[swapKey];
-            
-            if (swapKey && finalUrl.includes(swapKey)) {
-                finalUrl = finalUrl.replace(swapKey, swapValue);
-                console.log('تم تطبيق swap على الرابط:', swapKey, '->', swapValue);
-                console.log('الرابط بعد swap:', finalUrl);
-            }
-        }
-        
-        console.log('الرابط النهائي:', finalUrl);
-        
-        // جلب البث
-        const response = await axios({
-            method: 'get',
-            url: finalUrl,
-            headers: headers,
-            responseType: 'stream',
-            timeout: 30000,
-            maxRedirects: 10,
-            validateStatus: function (status) {
-                return status >= 200 && status < 500;
-            }
-        });
-        
-        console.log('استجابة المصدر:', response.status);
-        
-        // تحديد نوع المحتوى
-        let contentType = response.headers['content-type'] || '';
-        const isHlsUrl = finalUrl.includes('.m3u8') || 
-                        finalUrl.includes('.html') || 
-                        finalUrl.includes('playlist') ||
-                        server.mediatype === 'hls' ||
-                        contentType.includes('mpegurl') ||
-                        contentType.includes('x-mpegurl') ||
-                        contentType.includes('text/html') ||
-                        contentType.includes('text/plain');
-        
-        if (isHlsUrl) {
-            contentType = 'application/vnd.apple.mpegurl';
-        }
-        
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cache-Control', 'no-cache');
-        
-        // جمع البيانات
-        let data = '';
-        
-        response.data.on('data', chunk => {
-            data += chunk.toString();
-        });
-        
-        response.data.on('end', () => {
-            console.log('=== محتوى الملف ===');
-            console.log(data.substring(0, 500));
-            
-            // تحديد الرابط الأساسي
-            const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
-            
-            // معالجة الروابط مع تطبيق swap
-            let modifiedData = data;
-            
-            // تعديل جميع الروابط
-            modifiedData = modifiedData.replace(/^(?!#)(.*)$/gm, (match) => {
-                const trimmedMatch = match.trim();
-                
-                if (!trimmedMatch || trimmedMatch.startsWith('#') || trimmedMatch.startsWith('/media-proxy') || trimmedMatch.startsWith('data:')) {
-                    return match;
-                }
-                
-                // تطبيق swap على الرابط
-                let fullUrl;
-                if (trimmedMatch.startsWith('http://') || trimmedMatch.startsWith('https://')) {
-                    fullUrl = trimmedMatch;
-                } else {
-                    fullUrl = baseUrl + trimmedMatch;
-                }
-                
-                // تطبيق swap إذا وجد
-                if (swapKey && fullUrl.includes(swapKey)) {
-                    fullUrl = fullUrl.replace(swapKey, swapValue);
-                    console.log('تطبيق swap على:', trimmedMatch, '->', fullUrl);
-                }
-                
-                const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
-            });
-            
-            // تعديل روابط EXT-X-KEY
-            modifiedData = modifiedData.replace(/URI="([^"]+)"/g, (match, uri) => {
-                if (!uri.startsWith('http') && !uri.startsWith('data:') && !uri.startsWith('/media-proxy')) {
-                    let fullUri = baseUrl + uri;
-                    
-                    // تطبيق swap
-                    if (swapKey && fullUri.includes(swapKey)) {
-                        fullUri = fullUri.replace(swapKey, swapValue);
-                    }
-                    
-                    const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                    return 'URI="/media-proxy/${channelName}?url=' + encodeURIComponent(fullUri) + '&headers=' + encodedHeaders + '"';
-                }
-                return match;
-            });
-            
-            console.log('تم إرسال البيانات المعدلة');
-            res.send(modifiedData);
-        });
-        
-        response.data.on('error', (err) => {
-            console.error('خطأ في البث:', err);
-            if (!res.headersSent) {
-                res.status(500).send('خطأ في البث');
-            }
-        });
-        
-    } catch (error) {
-        console.error('خطأ في البروكسي:', error.message);
-        res.status(500).send('خطأ: ' + error.message);
-    }
-});
-
-// 4. مسار وسيط للملفات الفردية
-app.get('/media-proxy/:channel', async (req, res) => {
-    const targetUrl = req.query.url;
-    let headersData = {};
-    
-    if (req.query.headers) {
-        try {
-            headersData = JSON.parse(decodeURIComponent(req.query.headers));
-        } catch (e) {
-            console.error('خطأ في فك الهيدرز:', e);
-        }
-    }
-    
-    if (!targetUrl) {
-        return res.status(400).send('الرابط غير محدد');
-    }
-    
-    try {
-        console.log('جلب ملف:', targetUrl);
-        
-        const response = await axios({
-            method: 'get',
-            url: targetUrl,
-            headers: headersData,
-            responseType: 'stream',
-            timeout: 30000,
-            maxRedirects: 10
-        });
-        
-        let contentType = response.headers['content-type'] || 'application/octet-stream';
-        
-        // إذا كان الملف m3u8 أو html أو playlist
-        if (targetUrl.includes('.m3u8') || targetUrl.includes('.html') || targetUrl.includes('playlist') || contentType.includes('text')) {
-            contentType = 'application/vnd.apple.mpegurl';
-            
-            let data = '';
-            
-            response.data.on('data', chunk => {
-                data += chunk.toString();
-            });
-            
-            response.data.on('end', () => {
-                const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-                
-                const modifiedData = data.replace(/^(?!#)(.*)$/gm, (match) => {
-                    const trimmedMatch = match.trim();
-                    
-                    if (!trimmedMatch || trimmedMatch.startsWith('#') || trimmedMatch.startsWith('/media-proxy') || trimmedMatch.startsWith('data:')) {
-                        return match;
-                    }
-                    
-                    let fullUrl;
-                    if (trimmedMatch.startsWith('http://') || trimmedMatch.startsWith('https://')) {
-                        fullUrl = trimmedMatch;
-                    } else {
-                        fullUrl = baseUrl + trimmedMatch;
-                    }
-                    
-                    const encodedHeaders = encodeURIComponent(JSON.stringify(headersData));
-                    return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
-                });
-                
-                res.setHeader('Content-Type', contentType);
-                res.setHeader('Access-Control-Allow-Origin', '*');
-                res.send(modifiedData);
-            });
-        } else {
-            // للملفات الفردية (.js, .ts, .m4s)
-            // نمرر الملف كما هو
-            res.setHeader('Content-Type', contentType);
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            response.data.pipe(res);
-        }
-        
-        response.data.on('error', (err) => {
-            console.error('خطأ في الملف:', err);
-            if (!res.headersSent) {
-                res.status(500).send('خطأ في جلب الملف');
-            }
-        });
-        
-    } catch (error) {
-        console.error('خطأ في جلب الملف:', error.message);
-        res.status(500).send('خطأ في جلب الملف');
     }
 });
 
