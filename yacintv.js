@@ -71,8 +71,8 @@ app.get('/play/:channel', async (req, res) => {
                 };
                 
                 servers.push(server);
-                console.log(`سيرفر ${i + 1}:`, server.name, '-', server.url);
-                console.log('الهيدرز:', JSON.stringify(server.headers));
+                console.log(`سيرفر ${i + 1}:`, server.name);
+                console.log('الرابط:', server.url);
                 console.log('الـ swap:', JSON.stringify(server.swap));
             } catch (e) {
                 console.error(`خطأ في معالجة السيرفر ${i + 1}:`, e.message);
@@ -351,7 +351,7 @@ app.get('/get-servers/:channel', (req, res) => {
     res.json({ servers: streamInfo.servers });
 });
 
-// 3. مسار البروكسي - مع معالجة خاصة للهيدرز
+// 3. مسار البروكسي - مع دعم swap و .js files
 app.get('/proxy-stream/:channel', async (req, res) => {
     const channelName = req.params.channel;
     const serverIndex = parseInt(req.query.server) || 0;
@@ -368,16 +368,14 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         console.log('السيرفر:', server.name);
         console.log('الرابط:', server.url);
         
-        // بناء الهيدرز بدقة
+        // بناء الهيدرز
         const headers = {
             'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
             'Accept': '*/*',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive',
-            'Accept-Encoding': 'gzip, deflate, br'
+            'Connection': 'keep-alive'
         };
         
-        // إضافة Referer و Origin إذا وجدوا
         if (server.headers['Referer']) {
             headers['Referer'] = server.headers['Referer'];
         }
@@ -386,7 +384,6 @@ app.get('/proxy-stream/:channel', async (req, res) => {
             headers['Origin'] = server.headers['Origin'];
         }
         
-        // إضافة باقي الهيدرز المخصصة
         if (server.headers) {
             Object.keys(server.headers).forEach(key => {
                 if (!headers[key]) {
@@ -395,19 +392,23 @@ app.get('/proxy-stream/:channel', async (req, res) => {
             });
         }
         
-        // تطبيق swap إذا وجد
+        // تطبيق swap
         let finalUrl = server.url;
+        let swapKey = '';
+        let swapValue = '';
+        
         if (server.swap) {
-            const swapKey = Object.keys(server.swap)[0];
-            const swapValue = server.swap[swapKey];
+            swapKey = Object.keys(server.swap)[0];
+            swapValue = server.swap[swapKey];
+            
             if (swapKey && finalUrl.includes(swapKey)) {
                 finalUrl = finalUrl.replace(swapKey, swapValue);
-                console.log('تم تطبيق swap:', swapKey, '->', swapValue);
+                console.log('تم تطبيق swap على الرابط:', swapKey, '->', swapValue);
+                console.log('الرابط بعد swap:', finalUrl);
             }
         }
         
         console.log('الرابط النهائي:', finalUrl);
-        console.log('الهيدرز النهائية:', JSON.stringify(headers, null, 2));
         
         // جلب البث
         const response = await axios({
@@ -419,15 +420,10 @@ app.get('/proxy-stream/:channel', async (req, res) => {
             maxRedirects: 10,
             validateStatus: function (status) {
                 return status >= 200 && status < 500;
-            },
-            beforeRedirect: (options, responseDetails) => {
-                console.log('إعادة توجيه إلى:', responseDetails.headers.location);
             }
         });
         
         console.log('استجابة المصدر:', response.status);
-        console.log('نوع المحتوى:', response.headers['content-type']);
-        console.log('جميع هيدرز الاستجابة:', JSON.stringify(response.headers, null, 2));
         
         // تحديد نوع المحتوى
         let contentType = response.headers['content-type'] || '';
@@ -437,7 +433,8 @@ app.get('/proxy-stream/:channel', async (req, res) => {
                         server.mediatype === 'hls' ||
                         contentType.includes('mpegurl') ||
                         contentType.includes('x-mpegurl') ||
-                        contentType.includes('text/html');
+                        contentType.includes('text/html') ||
+                        contentType.includes('text/plain');
         
         if (isHlsUrl) {
             contentType = 'application/vnd.apple.mpegurl';
@@ -446,7 +443,6 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         res.setHeader('Content-Type', contentType);
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Access-Control-Allow-Headers', '*');
         
         // جمع البيانات
         let data = '';
@@ -457,14 +453,12 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         
         response.data.on('end', () => {
             console.log('=== محتوى الملف ===');
-            console.log('الحجم:', data.length);
-            console.log('المحتوى:', data.substring(0, 1000));
-            console.log('=== نهاية المحتوى ===');
+            console.log(data.substring(0, 500));
             
             // تحديد الرابط الأساسي
             const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
             
-            // معالجة الروابط
+            // معالجة الروابط مع تطبيق swap
             let modifiedData = data;
             
             // تعديل جميع الروابط
@@ -475,6 +469,7 @@ app.get('/proxy-stream/:channel', async (req, res) => {
                     return match;
                 }
                 
+                // تطبيق swap على الرابط
                 let fullUrl;
                 if (trimmedMatch.startsWith('http://') || trimmedMatch.startsWith('https://')) {
                     fullUrl = trimmedMatch;
@@ -482,15 +477,26 @@ app.get('/proxy-stream/:channel', async (req, res) => {
                     fullUrl = baseUrl + trimmedMatch;
                 }
                 
+                // تطبيق swap إذا وجد
+                if (swapKey && fullUrl.includes(swapKey)) {
+                    fullUrl = fullUrl.replace(swapKey, swapValue);
+                    console.log('تطبيق swap على:', trimmedMatch, '->', fullUrl);
+                }
+                
                 const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
-                const encodedUrl = encodeURIComponent(fullUrl);
-                return '/media-proxy/${channelName}?url=' + encodedUrl + '&headers=' + encodedHeaders;
+                return '/media-proxy/${channelName}?url=' + encodeURIComponent(fullUrl) + '&headers=' + encodedHeaders;
             });
             
             // تعديل روابط EXT-X-KEY
             modifiedData = modifiedData.replace(/URI="([^"]+)"/g, (match, uri) => {
                 if (!uri.startsWith('http') && !uri.startsWith('data:') && !uri.startsWith('/media-proxy')) {
-                    const fullUri = baseUrl + uri;
+                    let fullUri = baseUrl + uri;
+                    
+                    // تطبيق swap
+                    if (swapKey && fullUri.includes(swapKey)) {
+                        fullUri = fullUri.replace(swapKey, swapValue);
+                    }
+                    
                     const encodedHeaders = encodeURIComponent(JSON.stringify(headers));
                     return 'URI="/media-proxy/${channelName}?url=' + encodeURIComponent(fullUri) + '&headers=' + encodedHeaders + '"';
                 }
@@ -509,12 +515,7 @@ app.get('/proxy-stream/:channel', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('=== خطأ في البروكسي ===');
-        console.error('رسالة الخطأ:', error.message);
-        if (error.response) {
-            console.error('حالة الخطأ:', error.response.status);
-            console.error('هيدرز الخطأ:', JSON.stringify(error.response.headers, null, 2));
-        }
+        console.error('خطأ في البروكسي:', error.message);
         res.status(500).send('خطأ: ' + error.message);
     }
 });
@@ -550,7 +551,8 @@ app.get('/media-proxy/:channel', async (req, res) => {
         
         let contentType = response.headers['content-type'] || 'application/octet-stream';
         
-        if (targetUrl.includes('.m3u8') || targetUrl.includes('.html') || targetUrl.includes('playlist')) {
+        // إذا كان الملف m3u8 أو html أو playlist
+        if (targetUrl.includes('.m3u8') || targetUrl.includes('.html') || targetUrl.includes('playlist') || contentType.includes('text')) {
             contentType = 'application/vnd.apple.mpegurl';
             
             let data = '';
@@ -585,6 +587,8 @@ app.get('/media-proxy/:channel', async (req, res) => {
                 res.send(modifiedData);
             });
         } else {
+            // للملفات الفردية (.js, .ts, .m4s)
+            // نمرر الملف كما هو
             res.setHeader('Content-Type', contentType);
             res.setHeader('Access-Control-Allow-Origin', '*');
             response.data.pipe(res);
@@ -600,65 +604,6 @@ app.get('/media-proxy/:channel', async (req, res) => {
     } catch (error) {
         console.error('خطأ في جلب الملف:', error.message);
         res.status(500).send('خطأ في جلب الملف');
-    }
-});
-
-// مسار اختبار مباشر
-app.get('/test-proxy/:channel/:serverIndex', async (req, res) => {
-    const channelName = req.params.channel;
-    const serverIndex = parseInt(req.params.serverIndex) || 0;
-    const streamInfo = streamDataCache[channelName];
-    
-    if (!streamInfo || !streamInfo.servers[serverIndex]) {
-        return res.status(404).send('السيرفر غير متوفر');
-    }
-    
-    const server = streamInfo.servers[serverIndex];
-    
-    try {
-        const headers = {
-            'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive'
-        };
-        
-        if (server.headers['Referer']) {
-            headers['Referer'] = server.headers['Referer'];
-        }
-        
-        if (server.headers['Origin']) {
-            headers['Origin'] = server.headers['Origin'];
-        }
-        
-        let finalUrl = server.url;
-        if (server.swap) {
-            const swapKey = Object.keys(server.swap)[0];
-            const swapValue = server.swap[swapKey];
-            if (swapKey && finalUrl.includes(swapKey)) {
-                finalUrl = finalUrl.replace(swapKey, swapValue);
-            }
-        }
-        
-        const response = await axios.get(finalUrl, {
-            headers: headers,
-            timeout: 15000,
-            maxRedirects: 10
-        });
-        
-        res.json({
-            success: true,
-            url: finalUrl,
-            status: response.status,
-            contentType: response.headers['content-type'],
-            data: response.data.substring(0, 1000)
-        });
-    } catch (error) {
-        res.json({
-            success: false,
-            error: error.message,
-            url: server.url
-        });
     }
 });
 
