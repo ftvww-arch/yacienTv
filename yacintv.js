@@ -13,7 +13,7 @@ app.get('/play/:channel', async (req, res) => {
         const channelName = req.params.channel;
         
         // جلب البيانات من الـ API
-        const apiResponse = await axios.get(`https://s3-1nft.onrender.com/yacintv/last/live_tv_${channelName}`);
+        const apiResponse = await axios.get(`https://s3-1nft.onrender.com/yacintv/stream?id_live=live_tv_${channelName}`);
         const responseData = apiResponse.data;
         
         if (responseData.result !== 0) {
