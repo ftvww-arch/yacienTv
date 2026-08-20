@@ -1,41 +1,106 @@
 const express = require('express');
 const axios = require('axios');
-const compression = require('compression');
-const cors = require('cors');
+const crypto = require('crypto');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(compression());
-app.use(express.json());
+// ============ الإعدادات ============
+const CONFIG = {
+    MANIFEST_CACHE_DURATION: 10000, // 10 ثواني للمانيفست
+    STREAM_CACHE_DURATION: 60000, // دقيقة لبيانات القنوات
+    PAGE_CACHE_DURATION: 300000, // 5 دقائق للصفحات
+    MAX_REQUESTS_PER_MIN: 200, // حد الطلبات
+    TOKEN_EXPIRY: 300000, // 5 دقائق للتوكن
+    REQUEST_TIMEOUT: 15000, // 15 ثانية
+    CLEANUP_INTERVAL: 10000 // تنظيف كل 10 ثواني
+};
 
+// ============ التخزين ============
 let streamDataCache = {};
 let manifestCache = {};
 let pendingRequests = {};
+let pageCache = {};
+let validTokens = new Set();
+let requestCounts = {};
 
-// ============ تنظيف الكاش ============
+let stats = {
+    totalRequests: 0,
+    activeUsers: 0,
+    errors: 0,
+    manifestCacheHits: 0,
+    manifestCacheMisses: 0,
+    startTime: Date.now()
+};
+
+// ============ مراقبة الطلبات ============
+app.use((req, res, next) => {
+    stats.totalRequests++;
+    
+    // تنظيف عداد الطلبات
+    const ip = req.ip || req.connection.remoteAddress;
+    const now = Date.now();
+    
+    if (!requestCounts[ip]) {
+        requestCounts[ip] = { count: 0, timestamp: now };
+    }
+    
+    if (now - requestCounts[ip].timestamp > 60000) {
+        requestCounts[ip] = { count: 0, timestamp: now };
+    }
+    
+    requestCounts[ip].count++;
+    
+    // التحقق من الحد الأقصى
+    if (requestCounts[ip].count > CONFIG.MAX_REQUESTS_PER_MIN) {
+        return res.status(429).send('⚠️ طلبات كثيرة جداً، حاول لاحقاً');
+    }
+    
+    next();
+});
+
+// ============ تنظيف دوري ============
 setInterval(() => {
     const now = Date.now();
     
+    // تنظيف الطلبات المعلقة
     Object.keys(pendingRequests).forEach(key => {
         if (now - pendingRequests[key].timestamp > 15000) {
             completeRequest(key, null, 'مهلة');
         }
     });
     
+    // تنظيف كاش المانيفست
     Object.keys(manifestCache).forEach(key => {
-        if (now - manifestCache[key].timestamp > 60000) {
+        if (now - manifestCache[key].timestamp > CONFIG.MANIFEST_CACHE_DURATION) {
             delete manifestCache[key];
         }
     });
     
+    // تنظيف كاش القنوات
     Object.keys(streamDataCache).forEach(key => {
-        if (now - streamDataCache[key].timestamp > 300000) {
+        if (now - streamDataCache[key].timestamp > CONFIG.STREAM_CACHE_DURATION) {
             delete streamDataCache[key];
         }
     });
-}, 10000);
+    
+    // تنظيف كاش الصفحات
+    Object.keys(pageCache).forEach(key => {
+        if (now - pageCache[key].timestamp > CONFIG.PAGE_CACHE_DURATION) {
+            delete pageCache[key];
+        }
+    });
+    
+    // تنظيف عدادات الطلبات
+    Object.keys(requestCounts).forEach(ip => {
+        if (now - requestCounts[ip].timestamp > 60000) {
+            delete requestCounts[ip];
+        }
+    });
+    
+    // تنظيف التوكنات
+    // (التوكنات تنظف تلقائياً عند انتهاء صلاحيتها)
+}, CONFIG.CLEANUP_INTERVAL);
 
 // ============ دالة إكمال الطلب ============
 function completeRequest(cacheKey, data, error) {
@@ -47,7 +112,7 @@ function completeRequest(cacheKey, data, error) {
             res.status(500).send(error);
         } else {
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            res.setHeader('Cache-Control', 'public, max-age=60');
+            res.setHeader('Cache-Control', `public, max-age=${CONFIG.MANIFEST_CACHE_DURATION / 1000}`);
             res.send(data);
         }
     });
@@ -59,14 +124,26 @@ function completeRequest(cacheKey, data, error) {
 app.get('/play/:channel', async (req, res) => {
     try {
         const channelName = req.params.channel;
-        const channelId = `live_tv_${channelName}`;
         
-        // التحقق من الكاش
-        if (streamDataCache[channelName] && (Date.now() - streamDataCache[channelName].timestamp < 60000)) {
-            return sendPlayerPage(res, channelName, streamDataCache[channelName].servers);
+        // إنشاء توكن فريد
+        const token = crypto.randomBytes(32).toString('hex');
+        validTokens.add(token);
+        
+        // حذف التوكن بعد انتهاء الصلاحية
+        setTimeout(() => {
+            validTokens.delete(token);
+        }, CONFIG.TOKEN_EXPIRY);
+        
+        // التحقق من كاش الصفحة
+        if (pageCache[channelName]) {
+            stats.activeUsers++;
+            const cachedPage = pageCache[channelName].html.replace('__TOKEN__', token);
+            return res.send(cachedPage);
         }
         
-        console.log('📡 جاري تحميل القناة:', channelId);
+        console.log(`📡 جاري تحميل القناة: ${channelName}`);
+        
+        const channelId = `live_tv_${channelName}`;
         
         const apiResponse = await axios.get(`https://s3-1nft.onrender.com/yacintv/stream`, {
             params: { id_live: channelId },
@@ -74,7 +151,7 @@ app.get('/play/:channel', async (req, res) => {
                 'User-Agent': 'Mozilla/5.0',
                 'Accept': 'application/json'
             },
-            timeout: 15000
+            timeout: CONFIG.REQUEST_TIMEOUT
         });
         
         const responseData = apiResponse.data;
@@ -116,7 +193,7 @@ app.get('/play/:channel', async (req, res) => {
                     swap: innerData.swap || null
                 });
             } catch (e) {
-                console.error('خطأ:', e.message);
+                console.error(`خطأ في معالجة السيرفر ${i + 1}:`, e.message);
             }
         }
         
@@ -124,22 +201,168 @@ app.get('/play/:channel', async (req, res) => {
             return res.status(400).send('لا توجد سيرفرات صالحة');
         }
         
+        // حفظ في الكاش
         streamDataCache[channelName] = {
             servers: servers,
             timestamp: Date.now()
         };
         
-        sendPlayerPage(res, channelName, servers);
+        // إنشاء وحفظ الصفحة
+        const html = generatePlayerPage(channelName, servers);
+        pageCache[channelName] = {
+            html: html,
+            timestamp: Date.now()
+        };
+        
+        stats.activeUsers++;
+        res.send(html.replace('__TOKEN__', token));
         
     } catch (error) {
+        stats.errors++;
         console.error('خطأ:', error);
-        res.status(500).send('حدث خطأ');
+        res.status(500).send('حدث خطأ في تحميل القناة');
     }
 });
 
-// ============ دالة إرسال صفحة المشغل ============
-function sendPlayerPage(res, channelName, servers) {
-    res.send(`
+// ============ 2. مسار جلب المانيفست ============
+app.get('/get-manifest/:channel/:serverIndex', async (req, res) => {
+    const channelName = req.params.channel;
+    const serverIndex = parseInt(req.params.serverIndex) || 0;
+    const cacheKey = `${channelName}_${serverIndex}`;
+    
+    // التحقق من الكاش
+    if (manifestCache[cacheKey] && (Date.now() - manifestCache[cacheKey].timestamp < CONFIG.MANIFEST_CACHE_DURATION)) {
+        stats.manifestCacheHits++;
+        console.log(`✅ كاش: ${cacheKey}`);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', `public, max-age=${CONFIG.MANIFEST_CACHE_DURATION / 1000}`);
+        return res.send(manifestCache[cacheKey].data);
+    }
+    
+    stats.manifestCacheMisses++;
+    
+    // Single Flight - تجميع الطلبات المتزامنة
+    if (pendingRequests[cacheKey]) {
+        console.log(`⏳ انتظار الطلب الجاري: ${cacheKey}`);
+        pendingRequests[cacheKey].waiters.push(res);
+        
+        // مهلة 10 ثواني
+        setTimeout(() => {
+            if (pendingRequests[cacheKey]) {
+                const index = pendingRequests[cacheKey].waiters.indexOf(res);
+                if (index > -1) {
+                    pendingRequests[cacheKey].waiters.splice(index, 1);
+                    res.status(408).send('مهلة');
+                }
+            }
+        }, 10000);
+        
+        return;
+    }
+    
+    // إنشاء طلب جديد
+    pendingRequests[cacheKey] = {
+        waiters: [res],
+        timestamp: Date.now()
+    };
+    
+    const streamInfo = streamDataCache[channelName];
+    if (!streamInfo || !streamInfo.servers[serverIndex]) {
+        completeRequest(cacheKey, null, 'غير متوفر');
+        return;
+    }
+    
+    const server = streamInfo.servers[serverIndex];
+    
+    try {
+        console.log(`🔄 جلب جديد: ${cacheKey}`);
+        
+        const headers = {
+            'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive'
+        };
+        
+        if (server.headers['Referer']) headers['Referer'] = server.headers['Referer'];
+        if (server.headers['Origin']) headers['Origin'] = server.headers['Origin'];
+        
+        const response = await axios.get(server.url, {
+            headers: headers,
+            timeout: CONFIG.REQUEST_TIMEOUT,
+            maxRedirects: 10
+        });
+        
+        let data = response.data;
+        
+        // تطبيق swap
+        let swapKey = '';
+        let swapValue = '';
+        if (server.swap) {
+            swapKey = Object.keys(server.swap)[0];
+            swapValue = server.swap[swapKey];
+        }
+        
+        // تعديل الروابط لتكون مباشرة
+        const baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
+        
+        data = data.replace(/^(?!#)(.*)$/gm, (match) => {
+            const trimmedMatch = match.trim();
+            if (!trimmedMatch || trimmedMatch.startsWith('#')) return match;
+            
+            let fullUrl;
+            if (trimmedMatch.startsWith('http')) {
+                fullUrl = trimmedMatch;
+            } else {
+                fullUrl = baseUrl + trimmedMatch;
+            }
+            
+            // تطبيق swap
+            if (swapKey && fullUrl.includes(swapKey)) {
+                fullUrl = fullUrl.replace(swapKey, swapValue);
+            }
+            
+            return fullUrl;
+        });
+        
+        // حفظ في الكاش
+        manifestCache[cacheKey] = {
+            data: data,
+            timestamp: Date.now()
+        };
+        
+        completeRequest(cacheKey, data, null);
+        
+    } catch (error) {
+        stats.errors++;
+        console.error(`❌ خطأ في جلب المانيفست:`, error.message);
+        completeRequest(cacheKey, null, 'خطأ في جلب البيانات');
+    }
+});
+
+// ============ 3. مسار الإحصائيات ============
+app.get('/stats', (req, res) => {
+    const uptime = (Date.now() - stats.startTime) / 1000;
+    const requestsPerMinute = stats.totalRequests / (uptime / 60);
+    
+    res.json({
+        success: true,
+        uptime: `${Math.floor(uptime / 60)} دقيقة و ${Math.floor(uptime % 60)} ثانية`,
+        totalRequests: stats.totalRequests,
+        activeUsers: stats.activeUsers,
+        errors: stats.errors,
+        requestsPerMinute: Math.floor(requestsPerMinute),
+        manifestCacheHits: stats.manifestCacheHits,
+        manifestCacheMisses: stats.manifestCacheMisses,
+        cacheHitRate: stats.manifestCacheMisses > 0 
+            ? `${Math.floor((stats.manifestCacheHits / (stats.manifestCacheHits + stats.manifestCacheMisses)) * 100)}%`
+            : '0%'
+    });
+});
+
+// ============ دالة إنشاء صفحة المشغل ============
+function generatePlayerPage(channelName, servers) {
+    return `
         <!DOCTYPE html>
         <html lang="ar" dir="rtl">
         <head>
@@ -424,7 +647,6 @@ function sendPlayerPage(res, channelName, servers) {
                     z-index: 99;
                 }
                 
-                /* إخفاء العناصر */
                 .hidden {
                     opacity: 0;
                     pointer-events: none;
@@ -435,7 +657,6 @@ function sendPlayerPage(res, channelName, servers) {
             <div id="videoContainer">
                 <video id="video" controls autoplay playsinline></video>
                 
-                <!-- الشريط العلوي -->
                 <div id="topBar">
                     <a href="https://ytplus.com" class="logo">
                         <div class="logo-icon">▶</div>
@@ -444,34 +665,24 @@ function sendPlayerPage(res, channelName, servers) {
                     <div class="live-badge">● مباشر</div>
                 </div>
                 
-                <!-- حالة التحميل -->
                 <div id="status">
                     <div class="spinner"></div>
                     <div class="status-text">جاري التحميل...</div>
                 </div>
                 
-                <!-- رسالة الخطأ -->
                 <div id="errorMsg">
                     <div class="error-icon">⚠️</div>
                     <div id="errorText"></div>
                 </div>
                 
-                <!-- قائمة السيرفرات -->
                 <div id="serverList">
                     <div class="server-list-header">اختر السيرفر</div>
                 </div>
                 
-                <!-- شريط التحكم -->
                 <div id="controlBar">
-                    <button class="btn" onclick="toggleServers()" title="السيرفرات">
-                        📡
-                    </button>
-                    <button class="btn btn-play" id="playBtn" onclick="togglePlay()" title="تشغيل/إيقاف">
-                        ⏸
-                    </button>
-                    <button class="btn" onclick="reloadVideo()" title="إعادة تشغيل">
-                        🔄
-                    </button>
+                    <button class="btn" onclick="toggleServers()" title="السيرفرات">📡</button>
+                    <button class="btn btn-play" id="playBtn" onclick="togglePlay()" title="تشغيل/إيقاف">⏸</button>
+                    <button class="btn" onclick="reloadVideo()" title="إعادة تشغيل">🔄</button>
                 </div>
                 
                 <div id="footer">YTPlus.com © 2024</div>
@@ -493,11 +704,9 @@ function sendPlayerPage(res, channelName, servers) {
                 
                 const servers = ${JSON.stringify(servers)};
                 
-                // إظهار/إخفاء عناصر التحكم
                 function showControls() {
                     topBar.classList.remove('hidden');
                     controlBar.classList.remove('hidden');
-                    
                     clearTimeout(hideTimeout);
                     hideTimeout = setTimeout(hideControls, 3000);
                 }
@@ -622,7 +831,6 @@ function sendPlayerPage(res, channelName, servers) {
                     showControls();
                 }
                 
-                // أحداث
                 video.addEventListener('click', () => {
                     if (topBar.classList.contains('hidden')) {
                         showControls();
@@ -639,123 +847,37 @@ function sendPlayerPage(res, channelName, servers) {
                     playBtn.textContent = '▶';
                 });
                 
-                // بدء التشغيل
                 updateServerList();
                 playServer(0);
                 showControls();
             </script>
         </body>
         </html>
-    `);
+    `;
 }
 
-// ============ 2. جلب المانيفست مع Single Flight ============
-app.get('/get-manifest/:channel/:serverIndex', async (req, res) => {
-    const channelName = req.params.channel;
-    const serverIndex = parseInt(req.params.serverIndex) || 0;
-    const cacheKey = channelName + '_' + serverIndex;
-    
-    // التحقق من الكاش
-    if (manifestCache[cacheKey] && (Date.now() - manifestCache[cacheKey].timestamp < 60000)) {
-        console.log('✅ إرسال من الكاش:', cacheKey);
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Cache-Control', 'public, max-age=60');
-        return res.send(manifestCache[cacheKey].data);
-    }
-    
-    // التحقق من وجود طلب جاري
-    if (pendingRequests[cacheKey]) {
-        console.log('⏳ انتظار الطلب الجاري:', cacheKey);
-        pendingRequests[cacheKey].waiters.push(res);
-        
-        setTimeout(() => {
-            const index = pendingRequests[cacheKey].waiters.indexOf(res);
-            if (index > -1) {
-                pendingRequests[cacheKey].waiters.splice(index, 1);
-                res.status(408).send('مهلة');
-            }
-        }, 10000);
-        
-        return;
-    }
-    
-    // إنشاء طلب جديد
-    pendingRequests[cacheKey] = {
-        waiters: [res],
-        timestamp: Date.now()
-    };
-    
-    const streamInfo = streamDataCache[channelName];
-    if (!streamInfo || !streamInfo.servers[serverIndex]) {
-        completeRequest(cacheKey, null, 'غير متوفر');
-        return;
-    }
-    
-    const server = streamInfo.servers[serverIndex];
-    
-    try {
-        console.log('🔄 جلب جديد من المصدر:', cacheKey);
-        
-        const headers = {
-            'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9'
-        };
-        
-        if (server.headers['Referer']) headers['Referer'] = server.headers['Referer'];
-        if (server.headers['Origin']) headers['Origin'] = server.headers['Origin'];
-        
-        const response = await axios.get(server.url, {
-            headers: headers,
-            timeout: 15000,
-            maxRedirects: 10
-        });
-        
-        let data = response.data;
-        
-        // تطبيق swap
-        let swapKey = '';
-        let swapValue = '';
-        if (server.swap) {
-            swapKey = Object.keys(server.swap)[0];
-            swapValue = server.swap[swapKey];
-        }
-        
-        // تعديل الروابط
-        const baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
-        
-        data = data.replace(/^(?!#)(.*)$/gm, (match) => {
-            const trimmedMatch = match.trim();
-            if (!trimmedMatch || trimmedMatch.startsWith('#')) return match;
-            
-            let fullUrl;
-            if (trimmedMatch.startsWith('http')) {
-                fullUrl = trimmedMatch;
-            } else {
-                fullUrl = baseUrl + trimmedMatch;
-            }
-            
-            if (swapKey && fullUrl.includes(swapKey)) {
-                fullUrl = fullUrl.replace(swapKey, swapValue);
-            }
-            
-            return fullUrl;
-        });
-        
-        // حفظ في الكاش
-        manifestCache[cacheKey] = {
-            data: data,
-            timestamp: Date.now()
-        };
-        
-        completeRequest(cacheKey, data, null);
-        
-    } catch (error) {
-        console.error('❌ خطأ في جلب المانيفست:', error.message);
-        completeRequest(cacheKey, null, 'خطأ');
-    }
+// ============ معالجة الأخطاء العامة ============
+app.use((err, req, res, next) => {
+    stats.errors++;
+    console.error('خطأ عام:', err);
+    res.status(500).send('خطأ في الخادم');
 });
 
+// ============ معالجة إشارات الإنهاء ============
+process.on('SIGTERM', () => {
+    console.log('إيقاف الخادم...');
+    process.exit(0);
+});
+
+process.on('uncaughtException', (err) => {
+    stats.errors++;
+    console.error('خطأ غير متوقع:', err);
+});
+
+// ============ تشغيل الخادم ============
 app.listen(PORT, () => {
-    console.log(`🚀 YTPlus.com Server running on port ${PORT}`);
+    console.log('=================================');
+    console.log('🚀 YTPlus.com Player');
+    console.log(`📡 يعمل على المنفذ: ${PORT}`);
+    console.log('=================================');
 });
