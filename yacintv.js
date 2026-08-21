@@ -15,7 +15,7 @@ const CONFIG = {
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 6 * 60 * 60 * 1000, 
     LOGO_URL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/React-icon.svg/120px-React-icon.svg.png',
-    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // موقعك الرسمي لجلب الزيارات
+    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' 
 };
 
 // ==========================================
@@ -80,11 +80,10 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// فحص حالة المباراة من مسار /mach
+// فحص حالة القناة (التحقق فقط إذا كان الحقل فارغاً)
 // ==========================================
 async function validateMatchStatus(realChannelName) {
     try {
-        // جلب المباريات وحفظها في الكاش لمدة دقيقة لعدم استهلاك الموارد
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
             return res.data;
@@ -93,13 +92,17 @@ async function validateMatchStatus(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير موجودة في الجدول حالياً' };
-        if (targetMatch.status === 'انتهت' || targetMatch.time === 'انتهت') return { isAvailable: false, reason: 'انتهت المباراة' };
+        // إذا لم توجد المباراة أصلاً أو كان حقل القناة فارغاً نوقف التشغيل
+        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث' };
+        
+        const channelField = targetMatch.channel || targetMatch.id_live;
+        if (!channelField || channelField.trim() === '') {
+            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً' };
+        }
 
         return { isAvailable: true };
     } catch (e) {
-        // في حال تعطل مصدر المباريات، نسمح بتشغيل البث حتى لا يتوقف الموقع
-        return { isAvailable: true };
+        return { isAvailable: true }; // في حال تعطل مصدر المباريات، نسمح بالتشغيل اعتيادياً
     }
 }
 
@@ -159,6 +162,38 @@ async function fetchManifest(serverInfo) {
 // ==========================================
 // المسارات (Routes)
 // ==========================================
+
+// 🌟 مسار المباريات المخصص لموقعك مع إضافة حقل URl للمشغل
+app.get('/api/matches', async (req, res) => {
+    try {
+        const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
+        const matches = response.data;
+        const hostUrl = `${req.protocol}://${req.get('host')}`;
+
+        const formattedMatches = matches.map(match => {
+            let channelStr = match.channel || match.id_live || '';
+            let cleanChannel = channelStr.startsWith('live_tv_') ? channelStr.replace('live_tv_', '') : channelStr;
+            
+            let embedUrl = '';
+            if (cleanChannel) {
+                const hash = encodeId(cleanChannel);
+                embedUrl = `${hostUrl}/play/${hash}`;
+            }
+
+            return {
+                ...match,
+                URl: embedUrl // رابط المشغل الجاهز للاستخدام في موقعك
+            };
+        });
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.json(formattedMatches);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch matches' });
+    }
+});
+
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 app.get('/encrypt/:channelName', (req, res) => res.send(`<h1 style="text-align:center;">${encodeId(req.params.channelName)}</h1>`));
 
@@ -168,7 +203,6 @@ app.get('/play/:hash', async (req, res) => {
         const realChannel = decodeId(hash);
         if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
 
-        // فحص حالة المباراة قبل استهلاك أي موارد
         const matchStatus = await validateMatchStatus(realChannel);
         if (!matchStatus.isAvailable) {
             return res.send(generateOfflineUI(matchStatus.reason));
@@ -180,13 +214,12 @@ app.get('/play/:hash', async (req, res) => {
         
         res.send(generateUI(hash, servers, secureToken)); 
     } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً أو لم تبدأ المباراة'));
+        res.send(generateOfflineUI('البث غير متوفر حالياً'));
     }
 });
 
 app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
-        // حماية من السرقة الخارجية (تحقق من أن الطلب جاء من مشغلك)
         const referer = req.headers.referer || '';
         if (referer && !referer.includes(req.get('host'))) {
             return res.status(403).send('Access Denied');
@@ -215,8 +248,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 // ==========================================
 // واجهات المستخدم (UI)
 // ==========================================
-
-// 1. واجهة المشغل (إذا كانت المباراة تعمل)
 function generateUI(channelHash, servers, secureToken) {
     const serverOptions = servers.map((srv, idx) => `<option value="${idx}">${srv.name}</option>`).join('');
     return `
@@ -268,7 +299,6 @@ function generateUI(channelHash, servers, secureToken) {
 </html>`;
 }
 
-// 2. شاشة التوقف لجلب الزيارات لموقعك (الألوان حسب تفضيلك)
 function generateOfflineUI(reasonMsg) {
     return `
 <!DOCTYPE html>
@@ -288,9 +318,9 @@ function generateOfflineUI(reasonMsg) {
 </head>
 <body>
     <div class="container">
-        <h2>عفواً، لا يوجد بث حالياً</h2>
+        <h2>عفواً، لا يوجد بث متاح</h2>
         <div class="reason">${reasonMsg}</div>
-        <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي وتحديث المباريات</a>
+        <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي</a>
     </div>
 </body>
 </html>`;
