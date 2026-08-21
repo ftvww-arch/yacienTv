@@ -7,13 +7,13 @@ const PORT = process.env.PORT || 3000;
 
 // ============ الإعدادات ============
 const CONFIG = {
-    MANIFEST_CACHE_DURATION: 10000, // 10 ثواني للمانيفست
-    STREAM_CACHE_DURATION: 60000, // دقيقة لبيانات القنوات
-    PAGE_CACHE_DURATION: 300000, // 5 دقائق للصفحات
-    MAX_REQUESTS_PER_MIN: 200, // حد الطلبات
-    TOKEN_EXPIRY: 300000, // 5 دقائق للتوكن
-    REQUEST_TIMEOUT: 15000, // 15 ثانية
-    CLEANUP_INTERVAL: 10000 // تنظيف كل 10 ثواني
+    MANIFEST_CACHE_DURATION: 10000, 
+    STREAM_CACHE_DURATION: 60000, 
+    PAGE_CACHE_DURATION: 300000, 
+    MAX_REQUESTS_PER_MIN: 200, 
+    TOKEN_EXPIRY: 300000, 
+    REQUEST_TIMEOUT: 15000, 
+    CLEANUP_INTERVAL: 10000 
 };
 
 // ============ التخزين ============
@@ -36,26 +36,18 @@ let stats = {
 // ============ مراقبة الطلبات ============
 app.use((req, res, next) => {
     stats.totalRequests++;
-    
-    // تنظيف عداد الطلبات
     const ip = req.ip || req.connection.remoteAddress;
     const now = Date.now();
     
-    if (!requestCounts[ip]) {
-        requestCounts[ip] = { count: 0, timestamp: now };
-    }
-    
-    if (now - requestCounts[ip].timestamp > 60000) {
+    if (!requestCounts[ip] || now - requestCounts[ip].timestamp > 60000) {
         requestCounts[ip] = { count: 0, timestamp: now };
     }
     
     requestCounts[ip].count++;
     
-    // التحقق من الحد الأقصى
     if (requestCounts[ip].count > CONFIG.MAX_REQUESTS_PER_MIN) {
         return res.status(429).send('⚠️ طلبات كثيرة جداً، حاول لاحقاً');
     }
-    
     next();
 });
 
@@ -63,46 +55,27 @@ app.use((req, res, next) => {
 setInterval(() => {
     const now = Date.now();
     
-    // تنظيف الطلبات المعلقة
     Object.keys(pendingRequests).forEach(key => {
-        if (now - pendingRequests[key].timestamp > 15000) {
-            completeRequest(key, null, 'مهلة');
-        }
+        if (now - pendingRequests[key].timestamp > 15000) completeRequest(key, null, 'مهلة');
     });
     
-    // تنظيف كاش المانيفست
     Object.keys(manifestCache).forEach(key => {
-        if (now - manifestCache[key].timestamp > CONFIG.MANIFEST_CACHE_DURATION) {
-            delete manifestCache[key];
-        }
+        if (now - manifestCache[key].timestamp > CONFIG.MANIFEST_CACHE_DURATION) delete manifestCache[key];
     });
     
-    // تنظيف كاش القنوات
     Object.keys(streamDataCache).forEach(key => {
-        if (now - streamDataCache[key].timestamp > CONFIG.STREAM_CACHE_DURATION) {
-            delete streamDataCache[key];
-        }
+        if (now - streamDataCache[key].timestamp > CONFIG.STREAM_CACHE_DURATION) delete streamDataCache[key];
     });
     
-    // تنظيف كاش الصفحات
     Object.keys(pageCache).forEach(key => {
-        if (now - pageCache[key].timestamp > CONFIG.PAGE_CACHE_DURATION) {
-            delete pageCache[key];
-        }
+        if (now - pageCache[key].timestamp > CONFIG.PAGE_CACHE_DURATION) delete pageCache[key];
     });
     
-    // تنظيف عدادات الطلبات
     Object.keys(requestCounts).forEach(ip => {
-        if (now - requestCounts[ip].timestamp > 60000) {
-            delete requestCounts[ip];
-        }
+        if (now - requestCounts[ip].timestamp > 60000) delete requestCounts[ip];
     });
-    
-    // تنظيف التوكنات
-    // (التوكنات تنظف تلقائياً عند انتهاء صلاحيتها)
 }, CONFIG.CLEANUP_INTERVAL);
 
-// ============ دالة إكمال الطلب ============
 function completeRequest(cacheKey, data, error) {
     const request = pendingRequests[cacheKey];
     if (!request) return;
@@ -124,38 +97,24 @@ function completeRequest(cacheKey, data, error) {
 app.get('/play/:channel', async (req, res) => {
     try {
         const channelName = req.params.channel;
-        
-        // إنشاء توكن فريد
         const token = crypto.randomBytes(32).toString('hex');
         validTokens.add(token);
         
-        // حذف التوكن بعد انتهاء الصلاحية
-        setTimeout(() => {
-            validTokens.delete(token);
-        }, CONFIG.TOKEN_EXPIRY);
+        setTimeout(() => validTokens.delete(token), CONFIG.TOKEN_EXPIRY);
         
-        // التحقق من كاش الصفحة
         if (pageCache[channelName]) {
             stats.activeUsers++;
-            const cachedPage = pageCache[channelName].html.replace('__TOKEN__', token);
-            return res.send(cachedPage);
+            return res.send(pageCache[channelName].html.replace('__TOKEN__', token));
         }
         
-        console.log(`📡 جاري تحميل القناة: ${channelName}`);
-        
         const channelId = `live_tv_${channelName}`;
-        
         const apiResponse = await axios.get(`https://s3-1nft.onrender.com/yacintv/stream`, {
             params: { id_live: channelId },
-            headers: {
-                'User-Agent': 'Mozilla/5.0',
-                'Accept': 'application/json'
-            },
+            headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
             timeout: CONFIG.REQUEST_TIMEOUT
         });
         
         const responseData = apiResponse.data;
-        
         if (!responseData || (Array.isArray(responseData) && responseData.length === 0)) {
             return res.status(400).send('لا توجد بيانات للقناة');
         }
@@ -165,31 +124,19 @@ app.get('/play/:channel', async (req, res) => {
         
         for (let i = 0; i < dataArray.length; i++) {
             const serverData = dataArray[i];
-            
             if (serverData.result !== 0 || !serverData.data) continue;
             
             try {
                 let rawUrl = serverData.data.url;
-                let innerData;
-                
-                if (typeof rawUrl === 'string') {
-                    rawUrl = rawUrl.trim().replace(/^\t+/, '');
-                    if (rawUrl.startsWith('{')) {
-                        innerData = JSON.parse(rawUrl);
-                    } else {
-                        innerData = { url: rawUrl };
-                    }
-                } else {
-                    innerData = rawUrl;
-                }
+                let innerData = (typeof rawUrl === 'string') 
+                    ? (rawUrl.trim().startsWith('{') ? JSON.parse(rawUrl.trim()) : { url: rawUrl.trim() }) 
+                    : rawUrl;
                 
                 servers.push({
                     name: serverData.name || `سيرفر ${i + 1}`,
                     url: innerData.url,
                     headers: innerData.headers || {},
                     agent: innerData.agent || innerData.headers?.['User-Agent'] || 'Mozilla/5.0',
-                    mediatype: innerData.mediatype || 'auto',
-                    drm: innerData.drm || null,
                     swap: innerData.swap || null
                 });
             } catch (e) {
@@ -197,43 +144,30 @@ app.get('/play/:channel', async (req, res) => {
             }
         }
         
-        if (servers.length === 0) {
-            return res.status(400).send('لا توجد سيرفرات صالحة');
-        }
+        if (servers.length === 0) return res.status(400).send('لا توجد سيرفرات صالحة');
         
-        // حفظ في الكاش
-        streamDataCache[channelName] = {
-            servers: servers,
-            timestamp: Date.now()
-        };
+        streamDataCache[channelName] = { servers: servers, timestamp: Date.now() };
         
-        // إنشاء وحفظ الصفحة
         const html = generatePlayerPage(channelName, servers);
-        pageCache[channelName] = {
-            html: html,
-            timestamp: Date.now()
-        };
+        pageCache[channelName] = { html: html, timestamp: Date.now() };
         
         stats.activeUsers++;
         res.send(html.replace('__TOKEN__', token));
         
     } catch (error) {
         stats.errors++;
-        console.error('خطأ:', error);
         res.status(500).send('حدث خطأ في تحميل القناة');
     }
 });
 
 // ============ 2. مسار جلب المانيفست ============
 app.get('/get-manifest/:channel/:serverIndex', async (req, res) => {
-    const channelName = req.params.channel;
-    const serverIndex = parseInt(req.params.serverIndex) || 0;
-    const cacheKey = `${channelName}_${serverIndex}`;
+    const { channel, serverIndex } = req.params;
+    const index = parseInt(serverIndex) || 0;
+    const cacheKey = `${channel}_${index}`;
     
-    // التحقق من الكاش
     if (manifestCache[cacheKey] && (Date.now() - manifestCache[cacheKey].timestamp < CONFIG.MANIFEST_CACHE_DURATION)) {
         stats.manifestCacheHits++;
-        console.log(`✅ كاش: ${cacheKey}`);
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Cache-Control', `public, max-age=${CONFIG.MANIFEST_CACHE_DURATION / 1000}`);
         return res.send(manifestCache[cacheKey].data);
@@ -241,101 +175,59 @@ app.get('/get-manifest/:channel/:serverIndex', async (req, res) => {
     
     stats.manifestCacheMisses++;
     
-    // Single Flight - تجميع الطلبات المتزامنة
     if (pendingRequests[cacheKey]) {
-        console.log(`⏳ انتظار الطلب الجاري: ${cacheKey}`);
         pendingRequests[cacheKey].waiters.push(res);
-        
-        // مهلة 10 ثواني
         setTimeout(() => {
             if (pendingRequests[cacheKey]) {
-                const index = pendingRequests[cacheKey].waiters.indexOf(res);
-                if (index > -1) {
-                    pendingRequests[cacheKey].waiters.splice(index, 1);
+                const idx = pendingRequests[cacheKey].waiters.indexOf(res);
+                if (idx > -1) {
+                    pendingRequests[cacheKey].waiters.splice(idx, 1);
                     res.status(408).send('مهلة');
                 }
             }
         }, 10000);
-        
         return;
     }
     
-    // إنشاء طلب جديد
-    pendingRequests[cacheKey] = {
-        waiters: [res],
-        timestamp: Date.now()
-    };
+    pendingRequests[cacheKey] = { waiters: [res], timestamp: Date.now() };
     
-    const streamInfo = streamDataCache[channelName];
-    if (!streamInfo || !streamInfo.servers[serverIndex]) {
-        completeRequest(cacheKey, null, 'غير متوفر');
-        return;
-    }
+    const streamInfo = streamDataCache[channel];
+    if (!streamInfo || !streamInfo.servers[index]) return completeRequest(cacheKey, null, 'غير متوفر');
     
-    const server = streamInfo.servers[serverIndex];
+    const server = streamInfo.servers[index];
     
     try {
-        console.log(`🔄 جلب جديد: ${cacheKey}`);
-        
         const headers = {
             'User-Agent': server.headers['User-Agent'] || server.agent || 'Mozilla/5.0',
             'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
             'Connection': 'keep-alive'
         };
-        
         if (server.headers['Referer']) headers['Referer'] = server.headers['Referer'];
         if (server.headers['Origin']) headers['Origin'] = server.headers['Origin'];
         
-        const response = await axios.get(server.url, {
-            headers: headers,
-            timeout: CONFIG.REQUEST_TIMEOUT,
-            maxRedirects: 10
-        });
-        
+        const response = await axios.get(server.url, { headers, timeout: CONFIG.REQUEST_TIMEOUT });
         let data = response.data;
         
-        // تطبيق swap
-        let swapKey = '';
-        let swapValue = '';
+        let swapKey = '', swapValue = '';
         if (server.swap) {
             swapKey = Object.keys(server.swap)[0];
             swapValue = server.swap[swapKey];
         }
         
-        // تعديل الروابط لتكون مباشرة
         const baseUrl = server.url.substring(0, server.url.lastIndexOf('/') + 1);
-        
         data = data.replace(/^(?!#)(.*)$/gm, (match) => {
-            const trimmedMatch = match.trim();
-            if (!trimmedMatch || trimmedMatch.startsWith('#')) return match;
-            
-            let fullUrl;
-            if (trimmedMatch.startsWith('http')) {
-                fullUrl = trimmedMatch;
-            } else {
-                fullUrl = baseUrl + trimmedMatch;
-            }
-            
-            // تطبيق swap
-            if (swapKey && fullUrl.includes(swapKey)) {
-                fullUrl = fullUrl.replace(swapKey, swapValue);
-            }
-            
+            const trimmed = match.trim();
+            if (!trimmed || trimmed.startsWith('#')) return match;
+            let fullUrl = trimmed.startsWith('http') ? trimmed : baseUrl + trimmed;
+            if (swapKey && fullUrl.includes(swapKey)) fullUrl = fullUrl.replace(swapKey, swapValue);
             return fullUrl;
         });
         
-        // حفظ في الكاش
-        manifestCache[cacheKey] = {
-            data: data,
-            timestamp: Date.now()
-        };
-        
+        manifestCache[cacheKey] = { data: data, timestamp: Date.now() };
         completeRequest(cacheKey, data, null);
         
     } catch (error) {
         stats.errors++;
-        console.error(`❌ خطأ في جلب المانيفست:`, error.message);
         completeRequest(cacheKey, null, 'خطأ في جلب البيانات');
     }
 });
@@ -343,63 +235,45 @@ app.get('/get-manifest/:channel/:serverIndex', async (req, res) => {
 // ============ 3. مسار الإحصائيات ============
 app.get('/stats', (req, res) => {
     const uptime = (Date.now() - stats.startTime) / 1000;
-    const requestsPerMinute = stats.totalRequests / (uptime / 60);
-    
-    res.json({
-        success: true,
-        uptime: `${Math.floor(uptime / 60)} دقيقة و ${Math.floor(uptime % 60)} ثانية`,
-        totalRequests: stats.totalRequests,
-        activeUsers: stats.activeUsers,
-        errors: stats.errors,
-        requestsPerMinute: Math.floor(requestsPerMinute),
-        manifestCacheHits: stats.manifestCacheHits,
-        manifestCacheMisses: stats.manifestCacheMisses,
-        cacheHitRate: stats.manifestCacheMisses > 0 
-            ? `${Math.floor((stats.manifestCacheHits / (stats.manifestCacheHits + stats.manifestCacheMisses)) * 100)}%`
-            : '0%'
-    });
+    res.json({ success: true, uptime: `${Math.floor(uptime / 60)}m ${Math.floor(uptime % 60)}s`, activeUsers: stats.activeUsers });
 });
 
-// ============ دالة إنشاء صفحة المشغل ============
+// ============ دالة إنشاء صفحة المشغل (تم التحديث بالكامل) ============
 function generatePlayerPage(channelName, servers) {
     return `
         <!DOCTYPE html>
         <html lang="ar" dir="rtl">
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>YTPlus.com - ${channelName}</title>
-            <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>▶️</text></svg>">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <title>YTPlus - ${channelName}</title>
             <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
             <style>
                 :root {
-                    --primary: #ff0000;
-                    --secondary: #00e676;
-                    --dark: #0a0a0a;
-                    --glass: rgba(255, 255, 255, 0.1);
-                    --glass-hover: rgba(255, 255, 255, 0.2);
+                    --primary: #FFD700; /* أصفر احترافي */
+                    --bg-dark: #0B192C; /* أزرق سماوي داكن جداً */
+                    --bg-panel: rgba(11, 25, 44, 0.85);
+                    --text-light: #F8FAFC;
+                    --glass: rgba(255, 255, 255, 0.08);
+                    --glass-hover: rgba(255, 255, 255, 0.15);
                 }
                 
-                * { 
-                    margin: 0; 
-                    padding: 0; 
-                    box-sizing: border-box; 
-                }
+                * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
                 
                 body { 
-                    background: var(--dark);
-                    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+                    background: var(--bg-dark);
+                    font-family: system-ui, -apple-system, sans-serif;
                     height: 100vh;
+                    width: 100vw;
                     overflow: hidden;
-                    user-select: none;
-                    -webkit-user-select: none;
+                    color: var(--text-light);
                 }
                 
                 #videoContainer {
                     position: relative;
                     width: 100%;
                     height: 100%;
-                    cursor: pointer;
+                    background: #000;
                 }
                 
                 video { 
@@ -408,476 +282,250 @@ function generatePlayerPage(channelName, servers) {
                     object-fit: contain;
                 }
                 
-                /* شريط علوي */
-                #topBar {
+                .overlay-ui {
                     position: absolute;
-                    top: 0;
-                    left: 0;
-                    right: 0;
+                    left: 0; right: 0;
                     padding: 20px;
-                    background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent);
+                    z-index: 10;
+                    transition: opacity 0.4s ease;
+                }
+
+                #topBar {
+                    top: 0;
+                    background: linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%);
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
-                    z-index: 100;
-                    transition: all 0.3s ease;
                 }
                 
-                .logo {
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                    text-decoration: none;
-                }
-                
-                .logo-icon {
-                    width: 40px;
-                    height: 40px;
-                    background: var(--primary);
-                    border-radius: 50%;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    font-size: 20px;
-                    color: white;
-                    box-shadow: 0 0 20px rgba(255, 0, 0, 0.5);
-                }
-                
-                .logo-text {
-                    font-size: 24px;
-                    font-weight: bold;
-                    color: white;
-                    letter-spacing: 1px;
-                }
-                
-                .logo-text span {
-                    color: var(--primary);
-                }
+                .logo-text { font-size: 20px; font-weight: 800; }
+                .logo-text span { color: var(--primary); }
                 
                 .live-badge {
-                    background: var(--primary);
-                    color: white;
-                    padding: 5px 15px;
+                    background: rgba(239, 68, 68, 0.2);
+                    color: #EF4444;
+                    border: 1px solid #EF4444;
+                    padding: 4px 12px;
                     border-radius: 20px;
+                    font-size: 12px;
                     font-weight: bold;
-                    font-size: 14px;
-                    animation: pulse 2s infinite;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
                 }
-                
-                @keyframes pulse {
-                    0%, 100% { opacity: 1; }
-                    50% { opacity: 0.6; }
+                .live-badge::before {
+                    content: '';
+                    width: 8px; height: 8px;
+                    background: #EF4444;
+                    border-radius: 50%;
+                    animation: pulse 1.5s infinite;
                 }
+                @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
                 
-                /* شريط تحكم سفلي */
                 #controlBar {
-                    position: absolute;
                     bottom: 0;
-                    left: 0;
-                    right: 0;
-                    padding: 20px;
-                    background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+                    background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%);
                     display: flex;
                     justify-content: center;
                     align-items: center;
-                    gap: 15px;
-                    z-index: 100;
-                    transition: all 0.3s ease;
+                    gap: 20px;
+                    padding-bottom: 30px;
                 }
                 
                 .btn {
-                    width: 60px;
-                    height: 60px;
-                    border-radius: 50%;
                     background: var(--glass);
-                    border: 2px solid rgba(255, 255, 255, 0.3);
+                    border: 1px solid rgba(255,255,255,0.1);
                     color: white;
+                    border-radius: 50%;
+                    width: 50px; height: 50px;
+                    display: flex; justify-content: center; align-items: center;
                     cursor: pointer;
-                    font-size: 24px;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    transition: all 0.3s ease;
                     backdrop-filter: blur(10px);
                     -webkit-backdrop-filter: blur(10px);
+                    transition: all 0.2s;
                 }
-                
-                .btn:hover {
-                    background: var(--glass-hover);
-                    transform: scale(1.1);
-                    border-color: white;
+                .btn:hover { background: var(--glass-hover); transform: scale(1.05); }
+                .btn-play { 
+                    width: 65px; height: 65px; 
+                    background: var(--primary); 
+                    color: var(--bg-dark);
+                    border: none;
                 }
+                .btn-play:hover { background: #E6C200; }
                 
-                .btn:active {
-                    transform: scale(0.9);
-                }
-                
-                .btn-play {
-                    width: 80px;
-                    height: 80px;
-                    font-size: 32px;
-                    background: var(--primary);
-                    border-color: var(--primary);
-                    box-shadow: 0 0 30px rgba(255, 0, 0, 0.5);
-                }
-                
-                .btn-play:hover {
-                    background: #ff3333;
-                    border-color: #ff3333;
-                }
-                
-                /* حالة التحميل */
+                .btn svg { width: 24px; height: 24px; fill: currentColor; }
+                .btn-play svg { width: 32px; height: 32px; }
+
+                /* Loader */
                 #status {
-                    position: absolute;
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-                    display: none;
-                    z-index: 100;
-                    text-align: center;
+                    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                    display: none; text-align: center; z-index: 20;
                 }
-                
                 .spinner {
-                    width: 60px;
-                    height: 60px;
-                    border: 4px solid rgba(255, 255, 255, 0.3);
-                    border-top: 4px solid var(--primary);
+                    width: 40px; height: 40px;
+                    border: 3px solid rgba(255,255,255,0.1);
+                    border-top-color: var(--primary);
                     border-radius: 50%;
                     animation: spin 1s linear infinite;
-                    margin: 0 auto 20px;
+                    margin: 0 auto 10px;
                 }
-                
-                @keyframes spin {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                }
-                
-                .status-text {
-                    color: white;
-                    font-size: 18px;
-                }
-                
-                /* قائمة السيرفرات */
+                @keyframes spin { to { transform: rotate(360deg); } }
+
+                /* Server List */
                 #serverList {
-                    position: absolute;
-                    bottom: 100px;
-                    left: 50%;
-                    transform: translateX(-50%);
-                    background: rgba(0, 0, 0, 0.95);
-                    border-radius: 15px;
-                    padding: 15px;
-                    display: none;
-                    z-index: 100;
-                    max-height: 400px;
-                    overflow-y: auto;
-                    min-width: 300px;
-                    backdrop-filter: blur(20px);
-                    -webkit-backdrop-filter: blur(20px);
-                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%);
+                    background: var(--bg-panel);
+                    backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px);
+                    border: 1px solid rgba(255,255,255,0.05);
+                    border-radius: 16px; padding: 12px;
+                    display: none; z-index: 30;
+                    width: 90%; max-width: 320px;
                 }
-                
-                .server-list-header {
-                    color: white;
-                    font-size: 18px;
-                    font-weight: bold;
-                    margin-bottom: 15px;
-                    text-align: center;
-                }
-                
                 .server-item {
-                    padding: 15px;
-                    color: white;
-                    cursor: pointer;
-                    border-radius: 10px;
-                    transition: all 0.3s;
-                    margin-bottom: 5px;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
+                    padding: 12px 16px; margin-bottom: 6px;
+                    background: rgba(0,0,0,0.2); border-radius: 10px;
+                    cursor: pointer; transition: 0.2s;
+                    display: flex; align-items: center; gap: 12px;
+                    font-size: 14px;
                 }
+                .server-item:last-child { margin-bottom: 0; }
+                .server-item.active { background: var(--primary); color: var(--bg-dark); font-weight: bold; }
                 
-                .server-item:hover {
-                    background: rgba(255, 255, 255, 0.1);
-                }
-                
-                .server-item.active {
-                    background: var(--primary);
-                    box-shadow: 0 0 20px rgba(255, 0, 0, 0.3);
-                }
-                
-                .server-icon {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: 50%;
-                    background: rgba(255, 255, 255, 0.2);
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                }
-                
-                /* رسالة الخطأ */
-                #errorMsg {
-                    position: absolute;
-                    top: 50%;
-                    left: 50%;
-                    transform: translate(-50%, -50%);
-                    color: white;
-                    text-align: center;
-                    display: none;
-                    z-index: 100;
-                    background: rgba(0, 0, 0, 0.9);
-                    padding: 30px;
-                    border-radius: 15px;
-                    border: 1px solid rgba(255, 0, 0, 0.5);
-                }
-                
-                .error-icon {
-                    font-size: 50px;
-                    margin-bottom: 20px;
-                }
-                
-                /* تذييل */
-                #footer {
-                    position: absolute;
-                    bottom: 5px;
-                    left: 50%;
-                    transform: translateX(-50%);
-                    color: rgba(255, 255, 255, 0.5);
-                    font-size: 12px;
-                    z-index: 99;
-                }
-                
-                .hidden {
-                    opacity: 0;
-                    pointer-events: none;
-                }
+                .ui-hidden { opacity: 0; pointer-events: none; }
             </style>
         </head>
         <body>
             <div id="videoContainer">
-                <video id="video" controls autoplay playsinline></video>
+                <video id="video" playsinline></video>
                 
-                <div id="topBar">
-                    <a href="https://ytplus.com" class="logo">
-                        <div class="logo-icon">▶</div>
-                        <div class="logo-text">YT<span>Plus</span>.com</div>
-                    </a>
-                    <div class="live-badge">● مباشر</div>
+                <div id="topBar" class="overlay-ui">
+                    <div class="logo-text">YT<span>Plus</span></div>
+                    <div class="live-badge">مباشر</div>
                 </div>
                 
-                <div id="status">
-                    <div class="spinner"></div>
-                    <div class="status-text">جاري التحميل...</div>
-                </div>
+                <div id="status"><div class="spinner"></div><div id="statusText">جاري التحميل...</div></div>
                 
-                <div id="errorMsg">
-                    <div class="error-icon">⚠️</div>
-                    <div id="errorText"></div>
-                </div>
+                <div id="serverList"></div>
                 
-                <div id="serverList">
-                    <div class="server-list-header">اختر السيرفر</div>
+                <div id="controlBar" class="overlay-ui">
+                    <button class="btn" onclick="toggleServers()">
+                        <svg viewBox="0 0 24 24"><path d="M3 3h18v18H3z" fill="none"/><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>
+                    </button>
+                    <button class="btn btn-play" id="playBtn" onclick="togglePlay()">
+                        <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                        <svg id="pauseIcon" viewBox="0 0 24 24" style="display:none;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    </button>
+                    <button class="btn" onclick="reloadVideo()">
+                        <svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
                 </div>
-                
-                <div id="controlBar">
-                    <button class="btn" onclick="toggleServers()" title="السيرفرات">📡</button>
-                    <button class="btn btn-play" id="playBtn" onclick="togglePlay()" title="تشغيل/إيقاف">⏸</button>
-                    <button class="btn" onclick="reloadVideo()" title="إعادة تشغيل">🔄</button>
-                </div>
-                
-                <div id="footer">YTPlus.com © 2024</div>
             </div>
             
             <script>
                 const video = document.getElementById('video');
                 const status = document.getElementById('status');
-                const errorMsg = document.getElementById('errorMsg');
-                const errorText = document.getElementById('errorText');
+                const statusText = document.getElementById('statusText');
                 const serverListEl = document.getElementById('serverList');
-                const playBtn = document.getElementById('playBtn');
-                const topBar = document.getElementById('topBar');
-                const controlBar = document.getElementById('controlBar');
+                const uis = document.querySelectorAll('.overlay-ui');
+                const playIcon = document.getElementById('playIcon');
+                const pauseIcon = document.getElementById('pauseIcon');
                 
                 let hls = null;
                 let currentServerIndex = 0;
                 let hideTimeout;
-                
                 const servers = ${JSON.stringify(servers)};
                 
-                function showControls() {
-                    topBar.classList.remove('hidden');
-                    controlBar.classList.remove('hidden');
+                function toggleUI() {
+                    const isHidden = uis[0].classList.contains('ui-hidden');
+                    if (isHidden) showUI(); else hideUI();
+                }
+
+                function showUI() {
+                    uis.forEach(ui => ui.classList.remove('ui-hidden'));
                     clearTimeout(hideTimeout);
-                    hideTimeout = setTimeout(hideControls, 3000);
+                    if (!video.paused) hideTimeout = setTimeout(hideUI, 3500);
                 }
                 
-                function hideControls() {
+                function hideUI() {
                     if (!video.paused) {
-                        topBar.classList.add('hidden');
-                        controlBar.classList.add('hidden');
+                        uis.forEach(ui => ui.classList.add('ui-hidden'));
+                        serverListEl.style.display = 'none';
                     }
                 }
                 
-                function showStatus(msg) {
-                    document.querySelector('.status-text').textContent = msg;
-                    status.style.display = 'block';
-                }
-                
-                function hideStatus() {
-                    status.style.display = 'none';
-                }
-                
-                function showError(msg) {
-                    errorText.textContent = msg;
-                    errorMsg.style.display = 'block';
-                }
-                
-                function hideError() {
-                    errorMsg.style.display = 'none';
-                }
+                function showStatus(msg) { statusText.textContent = msg; status.style.display = 'block'; }
+                function hideStatus() { status.style.display = 'none'; }
                 
                 function updateServerList() {
-                    serverListEl.innerHTML = '<div class="server-list-header">اختر السيرفر</div>';
-                    
-                    servers.forEach((server, index) => {
+                    serverListEl.innerHTML = '';
+                    servers.forEach((server, i) => {
                         const div = document.createElement('div');
-                        div.className = 'server-item' + (index === currentServerIndex ? ' active' : '');
-                        div.innerHTML = 
-                            '<div class="server-icon">📡</div>' +
-                            '<span>' + server.name + '</span>';
-                        div.onclick = () => {
-                            playServer(index);
-                            serverListEl.style.display = 'none';
-                        };
+                        div.className = 'server-item' + (i === currentServerIndex ? ' active' : '');
+                        div.innerHTML = '<span>' + server.name + '</span>';
+                        div.onclick = (e) => { e.stopPropagation(); playServer(i); serverListEl.style.display = 'none'; };
                         serverListEl.appendChild(div);
                     });
                 }
                 
                 function toggleServers() {
                     serverListEl.style.display = serverListEl.style.display === 'block' ? 'none' : 'block';
+                    showUI();
                 }
                 
                 function playServer(index) {
-                    if (index >= servers.length) {
-                        showError('لا توجد سيرفرات متاحة');
-                        return;
-                    }
-                    
+                    if (index >= servers.length) { showStatus('لا توجد سيرفرات متاحة'); return; }
                     currentServerIndex = index;
                     updateServerList();
-                    showStatus('جاري تشغيل ' + servers[index].name + '...');
-                    hideError();
+                    showStatus('جاري الاتصال...');
                     
-                    if (hls) {
-                        hls.destroy();
-                        hls = null;
-                    }
+                    if (hls) { hls.destroy(); hls = null; }
                     
-                    const server = servers[index];
                     const manifestUrl = '/get-manifest/${channelName}/' + index;
                     
+                    // دعم HLS.js للأندرويد والكمبيوتر
                     if (Hls.isSupported()) {
-                        hls = new Hls({
-                            enableWorker: true,
-                            lowLatencyMode: true,
-                            backBufferLength: 90,
-                            maxBufferLength: 30,
-                            manifestLoadingTimeOut: 20000,
-                            levelLoadingTimeOut: 20000,
-                            fragLoadingTimeOut: 20000,
-                            xhrSetup: function(xhr, url) {
-                                if (url.includes('http')) {
-                                    if (server.headers) {
-                                        Object.keys(server.headers).forEach(key => {
-                                            xhr.setRequestHeader(key, server.headers[key]);
-                                        });
-                                    }
-                                }
-                            }
-                        });
-                        
+                        hls = new Hls({ lowLatencyMode: true });
                         hls.loadSource(manifestUrl);
                         hls.attachMedia(video);
-                        
-                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                            hideStatus();
-                            video.play().catch(e => {});
-                            playBtn.textContent = '⏸';
+                        hls.on(Hls.Events.MANIFEST_PARSED, () => { hideStatus(); video.play(); });
+                        hls.on(Hls.Events.ERROR, (event, data) => {
+                            if (data.fatal) setTimeout(() => playServer((index + 1) % servers.length), 2000);
                         });
-                        
-                        hls.on(Hls.Events.ERROR, function(event, data) {
-                            console.error('خطأ HLS:', data);
-                            if (data.fatal) {
-                                showError('فشل تشغيل السيرفر، جاري تجربة سيرفر آخر...');
-                                setTimeout(() => playServer(index + 1), 2000);
-                            }
+                    } 
+                    // الدعم المباشر لأجهزة الآيفون (iOS Safari)
+                    else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                        video.src = manifestUrl;
+                        video.addEventListener('loadedmetadata', () => { hideStatus(); video.play(); });
+                        video.addEventListener('error', () => {
+                            setTimeout(() => playServer((index + 1) % servers.length), 2000);
                         });
+                    } else {
+                        showStatus('المتصفح لا يدعم التشغيل');
                     }
                 }
                 
                 function togglePlay() {
-                    if (video.paused) {
-                        video.play();
-                        playBtn.textContent = '⏸';
-                    } else {
-                        video.pause();
-                        playBtn.textContent = '▶';
-                    }
-                    showControls();
+                    video.paused ? video.play() : video.pause();
+                    showUI();
                 }
                 
-                function reloadVideo() {
-                    playServer(currentServerIndex);
-                    showControls();
-                }
+                function reloadVideo() { playServer(currentServerIndex); }
                 
-                video.addEventListener('click', () => {
-                    if (topBar.classList.contains('hidden')) {
-                        showControls();
-                    } else {
-                        hideControls();
-                    }
-                });
+                video.addEventListener('click', toggleUI);
+                video.addEventListener('play', () => { playIcon.style.display = 'none'; pauseIcon.style.display = 'block'; });
+                video.addEventListener('pause', () => { playIcon.style.display = 'block'; pauseIcon.style.display = 'none'; showUI(); });
                 
-                video.addEventListener('play', () => {
-                    playBtn.textContent = '⏸';
-                });
-                
-                video.addEventListener('pause', () => {
-                    playBtn.textContent = '▶';
-                });
-                
+                // بدء التشغيل
                 updateServerList();
                 playServer(0);
-                showControls();
+                showUI();
             </script>
         </body>
         </html>
     `;
 }
 
-// ============ معالجة الأخطاء العامة ============
-app.use((err, req, res, next) => {
-    stats.errors++;
-    console.error('خطأ عام:', err);
-    res.status(500).send('خطأ في الخادم');
-});
+app.use((err, req, res, next) => { res.status(500).send('خطأ في الخادم'); });
+process.on('uncaughtException', (err) => { console.error('خطأ غير متوقع:', err); });
 
-// ============ معالجة إشارات الإنهاء ============
-process.on('SIGTERM', () => {
-    console.log('إيقاف الخادم...');
-    process.exit(0);
-});
-
-process.on('uncaughtException', (err) => {
-    stats.errors++;
-    console.error('خطأ غير متوقع:', err);
-});
-
-// ============ تشغيل الخادم ============
-app.listen(PORT, () => {
-    console.log('=================================');
-    console.log('🚀 YTPlus.com Player');
-    console.log(`📡 يعمل على المنفذ: ${PORT}`);
-    console.log('=================================');
-});
+app.listen(PORT, () => { console.log(\`🚀 YTPlus Player works on port: \${PORT}\`); });
