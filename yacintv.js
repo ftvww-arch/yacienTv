@@ -12,35 +12,13 @@ const CONFIG = {
     API_BASE_URL: 'https://s3-1nft.onrender.com/yacintv',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
-    SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
-    TOKEN_EXPIRY: 6 * 60 * 60 * 1000, 
     LOGO_URL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/React-icon.svg/120px-React-icon.svg.png',
     MAIN_WEBSITE: 'https://www.kirozozo.xyz/' 
 };
 
 // ==========================================
-// دوال التشفير والحماية
+// دوال التشفير
 // ==========================================
-function generateSecureToken(ip) {
-    const expires = Date.now() + CONFIG.TOKEN_EXPIRY;
-    const data = `${ip}:${expires}`;
-    const signature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(data).digest('hex');
-    return Buffer.from(`${data}:${signature}`).toString('base64');
-}
-
-function verifySecureToken(token) {
-    try {
-        const decoded = Buffer.from(token, 'base64').toString('utf8');
-        const [tokenIp, expires, signature] = decoded.split(':');
-        if (Date.now() > parseInt(expires)) return false; 
-        const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${tokenIp}:${expires}`).digest('hex');
-        return signature === expectedSignature;
-    } catch (e) {
-        return false;
-    }
-}
-
-function getClientIp(req) { return req.headers['x-forwarded-for'] || req.socket.remoteAddress; }
 function encodeId(text) { return Buffer.from(text).toString('hex'); }
 function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
 
@@ -80,7 +58,7 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// فحص حالة القناة (التحقق فقط إذا كان الحقل فارغاً)
+// فحص حالة القناة
 // ==========================================
 async function validateMatchStatus(realChannelName) {
     try {
@@ -92,7 +70,6 @@ async function validateMatchStatus(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        // إذا لم توجد المباراة أصلاً أو كان حقل القناة فارغاً نوقف التشغيل
         if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث' };
         
         const channelField = targetMatch.channel || targetMatch.id_live;
@@ -102,7 +79,7 @@ async function validateMatchStatus(realChannelName) {
 
         return { isAvailable: true };
     } catch (e) {
-        return { isAvailable: true }; // في حال تعطل مصدر المباريات، نسمح بالتشغيل اعتيادياً
+        return { isAvailable: true }; 
     }
 }
 
@@ -163,7 +140,7 @@ async function fetchManifest(serverInfo) {
 // المسارات (Routes)
 // ==========================================
 
-// 🌟 مسار المباريات المخصص لموقعك مع إضافة حقل URl للمشغل
+// مسار المباريات لربطه بموقعك
 app.get('/api/matches', async (req, res) => {
     try {
         const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -182,7 +159,7 @@ app.get('/api/matches', async (req, res) => {
 
             return {
                 ...match,
-                URl: embedUrl // رابط المشغل الجاهز للاستخدام في موقعك
+                URl: embedUrl 
             };
         });
 
@@ -209,24 +186,33 @@ app.get('/play/:hash', async (req, res) => {
         }
 
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const userIp = getClientIp(req);
-        const secureToken = generateSecureToken(userIp);
-        
-        res.send(generateUI(hash, servers, secureToken)); 
+        res.send(generateUI(hash, servers)); 
     } catch (error) {
         res.send(generateOfflineUI('البث غير متوفر حالياً'));
     }
 });
 
+// 🌟 مسار الـ Manifest محمي بالكامل ومنع السرقة نهائياً
 app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
-        const referer = req.headers.referer || '';
-        if (referer && !referer.includes(req.get('host'))) {
-            return res.status(403).send('Access Denied');
+        const userAgent = (req.headers['user-agent'] || '').toLowerCase();
+        const referer = (req.headers['referer'] || req.headers['origin'] || '').toLowerCase();
+        const host = req.get('host') || '';
+        const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
+
+        // 1. حظر برامج التشغيل الخارجية وأدوات السحب (VLC, IPTV, cURL, Python...)
+        const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget'];
+        if (blockedAgents.some(agent => userAgent.includes(agent))) {
+            return res.status(403).send('Access Denied: External Players Not Allowed');
         }
 
-        const providedToken = req.query.token;
-        if (!providedToken || !verifySecureToken(providedToken)) return res.status(403).send('Invalid Token');
+        // 2. التحقق من أن الطلب قادم حصرياً من نطاقك أو المشغل الخاص بك (يمنع النسخ المباشر وفتحه بمتصفح خارجي)
+        const isFromMyHost = referer.includes(host);
+        const isFromMainSite = referer.includes(mainHost);
+
+        if (!isFromMyHost && !isFromMainSite) {
+            return res.status(403).send('Access Denied: Direct link access is restricted.');
+        }
 
         const { hash, serverIndex } = req.params;
         const realChannel = decodeId(hash);
@@ -248,7 +234,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 // ==========================================
 // واجهات المستخدم (UI)
 // ==========================================
-function generateUI(channelHash, servers, secureToken) {
+function generateUI(channelHash, servers) {
     const serverOptions = servers.map((srv, idx) => `<option value="${idx}">${srv.name}</option>`).join('');
     return `
 <!DOCTYPE html>
@@ -282,9 +268,8 @@ function generateUI(channelHash, servers, secureToken) {
     <script>
         const video = document.getElementById('video');
         let hls = null;
-        const SECURITY_TOKEN = '${secureToken}'; 
         function changeServer(serverIndex) {
-            const manifestUrl = '/manifest/${channelHash}/' + serverIndex + '?token=' + encodeURIComponent(SECURITY_TOKEN);
+            const manifestUrl = '/manifest/${channelHash}/' + serverIndex;
             if (hls) { hls.destroy(); hls = null; }
             if (Hls.isSupported()) {
                 hls = new Hls(); hls.loadSource(manifestUrl); hls.attachMedia(video);
@@ -327,5 +312,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`✅ Secure Server running on port ${PORT}`);
 });
