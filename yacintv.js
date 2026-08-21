@@ -5,7 +5,31 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// 1. محرك الكاش المتقدم (لحماية السيرفر من الضغط)
+// الإعدادات العامة (يمكنك تغيير الـ API من هنا بسهولة)
+// ==========================================
+const CONFIG = {
+    API_BASE_URL: 'https://s3-1nft.onrender.com/yacintv',
+    CACHE_DURATION: 300000, // 5 دقائق للسيرفرات
+    MANIFEST_CACHE: 2000    // ثانيتين للمانيفست (لضمان عمل الآيفون)
+};
+
+// ==========================================
+// دوال التشفير وفك التشفير لأسماء القنوات
+// ==========================================
+function encodeId(text) {
+    return Buffer.from(text).toString('hex');
+}
+
+function decodeId(hash) {
+    try {
+        return Buffer.from(hash, 'hex').toString('utf8');
+    } catch (e) {
+        return null;
+    }
+}
+
+// ==========================================
+// 1. محرك الكاش المتقدم (Single Flight)
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -50,18 +74,46 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// 2. دوال جلب البيانات
+// 2. دوال جلب البيانات (الذكية مع التبديل التلقائي)
 // ==========================================
-async function fetchChannelServers(channelName) {
-    const response = await axios.get(`https://s3-1nft.onrender.com/yacintv/stream`, {
-        params: { id_live: `live_tv_${channelName}` },
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        timeout: 10000
-    });
+async function fetchChannelServers(realChannelName) {
+    const channelId = `live_tv_${realChannelName}`;
+    let dataArray = null;
 
-    const dataArray = Array.isArray(response.data) ? response.data : [response.data];
+    // 1. المحاولة الأولى (المسار الأول)
+    try {
+        const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, {
+            params: { id_live: channelId },
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            timeout: 8000
+        });
+        
+        if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) {
+            dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
+        }
+    } catch (e) {
+        console.log(`[API 1 Failed] Switching to fallback for: ${channelId}`);
+    }
+
+    // 2. المحاولة الثانية (المسار البديل) في حال فشل الأول أو عاد بفراغ
+    if (!dataArray || dataArray.length === 0) {
+        try {
+            const response2 = await axios.get(`${CONFIG.API_BASE_URL}/live_id/${channelId}`, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 8000
+            });
+            
+            if (response2.data) {
+                dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
+            }
+        } catch (e) {
+            console.log(`[API 2 Failed] Could not fetch: ${channelId}`);
+        }
+    }
+
+    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات للقناة من المصدرين');
+
     const servers = [];
-
     dataArray.forEach((srv, i) => {
         if (srv.result !== 0 || !srv.data) return;
         try {
@@ -79,7 +131,7 @@ async function fetchChannelServers(channelName) {
         } catch (e) {}
     });
 
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات');
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات صالحة');
     return servers;
 }
 
@@ -108,29 +160,49 @@ async function fetchManifest(serverInfo) {
 // ==========================================
 // 3. المسارات (Routes)
 // ==========================================
-app.get('/play/:channel', async (req, res) => {
+
+// مسار مساعد لك لتشفير أسماء القنوات (افتحه في المتصفح للحصول على الكود المشفر)
+app.get('/encrypt/:channelName', (req, res) => {
+    const encrypted = encodeId(req.params.channelName);
+    res.send(`
+        <div style="font-family:sans-serif; text-align:center; margin-top:50px;">
+            <h2>الاسم الأصلي: ${req.params.channelName}</h2>
+            <h1 style="color:green;">الكود المشفر: ${encrypted}</h1>
+            <p>الرابط الخاص بك سيكون: <b>/play/${encrypted}</b></p>
+        </div>
+    `);
+});
+
+app.get('/play/:hash', async (req, res) => {
     try {
-        const channel = req.params.channel;
-        const servers = await CacheEngine.getOrFetch(`servers_${channel}`, () => fetchChannelServers(channel), 300000);
-        res.send(generateUI(channel, servers));
+        const hash = req.params.hash;
+        const realChannel = decodeId(hash); // فك التشفير داخلياً
+        
+        if (!realChannel) return res.status(400).send('Invalid Channel ID');
+
+        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
+        
+        // نرسل الكود المشفر للواجهة لتبقى القناة الحقيقية مخفية
+        res.send(generateUI(hash, servers)); 
     } catch (error) {
-        res.status(500).send('<h3 style="text-align:center;margin-top:50px;">القناة غير متوفرة</h3>');
+        res.status(500).send('<h3 style="text-align:center;margin-top:50px;">القناة غير متوفرة حالياً</h3>');
     }
 });
 
-app.get('/manifest/:channel/:serverIndex', async (req, res) => {
+app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
-        const { channel, serverIndex } = req.params;
-        const cacheKey = `manifest_${channel}_${serverIndex}`;
+        const { hash, serverIndex } = req.params;
+        const realChannel = decodeId(hash);
+        if (!realChannel) throw new Error('Invalid ID');
+
+        const cacheKey = `manifest_${realChannel}_${serverIndex}`;
         
-        const servers = await CacheEngine.getOrFetch(`servers_${channel}`, () => fetchChannelServers(channel), 300000);
+        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const serverInfo = servers[parseInt(serverIndex)];
         if (!serverInfo) throw new Error('السيرفر غير موجود');
 
-        // كاش المانيفست لمدة ثانيتين فقط لضمان استمرار البث المباشر (تحديث مستمر للآيفون)
-        const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo), 2000);
+        const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo), CONFIG.MANIFEST_CACHE);
 
-        // إجبار الآيفون والمتصفحات على جلب التحديثات الجديدة وعدم تجميد البث
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -144,10 +216,9 @@ app.get('/manifest/:channel/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// 4. واجهة المستخدم (التصميم البسيط والخفيف)
+// 4. واجهة المستخدم 
 // ==========================================
-function generateUI(channelName, servers) {
-    // إنشاء خيارات السيرفرات للقائمة المنسدلة
+function generateUI(channelHash, servers) {
     const serverOptions = servers.map((srv, idx) => `<option value="${idx}">${srv.name}</option>`).join('');
 
     return `
@@ -156,79 +227,34 @@ function generateUI(channelName, servers) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>${channelName}</title>
+    <title>Live Stream</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         body { 
-            margin: 0; 
-            padding: 0; 
-            background-color: #000; 
-            overflow: hidden; 
-            font-family: Arial, sans-serif;
-            color: #fff;
+            margin: 0; padding: 0; background-color: #000; overflow: hidden; font-family: Arial, sans-serif; color: #fff;
         }
-        
-        /* الشريط العلوي البسيط */
         #top-bar {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 60px;
-            background-color: #0d2741; /* أزرق سماوي داكن */
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 0 15px;
-            box-sizing: border-box;
-            z-index: 10;
-            border-bottom: 2px solid #FFD700; /* خط أصفر */
+            position: absolute; top: 0; left: 0; width: 100%; height: 60px;
+            background-color: #0d2741; display: flex; justify-content: space-between; align-items: center;
+            padding: 0 15px; box-sizing: border-box; z-index: 10; border-bottom: 2px solid #FFD700;
         }
-
-        .site-title {
-            font-size: 18px;
-            font-weight: bold;
-            color: #FFD700; /* لون أصفر */
-        }
-
+        .site-title { font-size: 18px; font-weight: bold; color: #FFD700; }
         .server-selector {
-            background-color: #000;
-            color: #FFD700;
-            border: 1px solid #FFD700;
-            padding: 8px;
-            border-radius: 4px;
-            font-size: 14px;
-            outline: none;
-            cursor: pointer;
+            background-color: #000; color: #FFD700; border: 1px solid #FFD700;
+            padding: 8px; border-radius: 4px; font-size: 14px; outline: none; cursor: pointer;
         }
-
-        /* حاوية الفيديو */
-        #video-container {
-            position: absolute;
-            top: 60px; /* تحت الشريط العلوي مباشر */
-            bottom: 0;
-            width: 100%;
-            background: #000;
-        }
-
-        video {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-        }
+        #video-container { position: absolute; top: 60px; bottom: 0; width: 100%; background: #000; }
+        video { width: 100%; height: 100%; object-fit: contain; }
     </style>
 </head>
 <body>
-
     <div id="top-bar">
-        <div class="site-title">YTPlus | ${channelName}</div>
+        <div class="site-title">YTPlus Player</div>
         <select class="server-selector" id="server-select" onchange="changeServer(this.value)">
             ${serverOptions}
         </select>
     </div>
-
     <div id="video-container">
-        <!-- الخصائص هنا ضرورية جداً لعمل الآيفون بدون مشاكل -->
         <video id="video" controls playsinline webkit-playsinline autoplay></video>
     </div>
 
@@ -237,14 +263,14 @@ function generateUI(channelName, servers) {
         let hls = null;
 
         function changeServer(serverIndex) {
-            const manifestUrl = '/manifest/${channelName}/' + serverIndex;
+            // نستخدم الكود المشفر لجلب البث
+            const manifestUrl = '/manifest/${channelHash}/' + serverIndex;
 
             if (hls) {
                 hls.destroy();
                 hls = null;
             }
 
-            // لأجهزة الأندرويد والكمبيوتر
             if (Hls.isSupported()) {
                 hls = new Hls();
                 hls.loadSource(manifestUrl);
@@ -252,9 +278,7 @@ function generateUI(channelName, servers) {
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
                     video.play().catch(e => console.log('Autoplay prevented'));
                 });
-                // ملاحظة: تم حذف أمر إعادة التحميل التلقائي عند الخطأ لمنع التبديل العشوائي
             } 
-            // لأجهزة الآيفون (iOS Safari)
             else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = manifestUrl;
                 video.addEventListener('loadedmetadata', function() {
@@ -262,8 +286,6 @@ function generateUI(channelName, servers) {
                 });
             }
         }
-
-        // تشغيل السيرفر الأول تلقائياً عند فتح الصفحة
         changeServer(0);
     </script>
 </body>
