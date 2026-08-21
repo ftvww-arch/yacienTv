@@ -3,6 +3,9 @@ const axios = require('axios');
 const crypto = require('crypto');
 const app = express();
 
+// 🌟 تحسين الاستقرار على استضافات مثل Render
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
@@ -12,11 +15,15 @@ const CONFIG = {
     API_BASE_URL: 'https://s3-1nft.onrender.com/yacintv',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
-    SECRET_KEY: crypto.randomBytes(32).toString('hex'), // مفتاح تشفير سري يتغير عند إعادة تشغيل السيرفر
-    TOKEN_EXPIRY: 10 * 60 * 1000, // صلاحية التوكن 10 دقائق كما طلبت
+    SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
+    TOKEN_EXPIRY: 10 * 60 * 1000, // 10 دقائق
     LOGO_URL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/React-icon.svg/120px-React-icon.svg.png',
     MAIN_WEBSITE: 'https://www.kirozozo.xyz/' 
 };
+
+// حماية الكود من التوقف المفاجئ
+process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
+process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
 
 // ==========================================
 // دوال التشفير والأمان
@@ -33,10 +40,8 @@ function verifySecureToken(token, ip) {
         const decoded = Buffer.from(token, 'base64').toString('utf8');
         const [tokenIp, expires, signature] = decoded.split(':');
         
-        // التحقق من انتهاء الوقت (10 دقائق)
         if (Date.now() > parseInt(expires)) return false; 
         
-        // التحقق من مطابقة الـ IP وتوقيع التوكن
         const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${tokenIp}:${expires}`).digest('hex');
         return signature === expectedSignature && tokenIp === ip;
     } catch (e) {
@@ -45,7 +50,7 @@ function verifySecureToken(token, ip) {
 }
 
 function getClientIp(req) { 
-    return req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.socket.remoteAddress; 
+    return req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip; 
 }
 
 function encodeId(text) { return Buffer.from(text).toString('hex'); }
@@ -65,6 +70,11 @@ const CacheEngine = {
         this.inFlight.set(key, []);
         try {
             const data = await fetcher();
+            // تحديد حد أقصى لعناصر الكاش حتى لا تمتلئ الرامات (حماية إضافية)
+            if (this.memory.size > 300) {
+                const firstKey = this.memory.keys().next().value;
+                this.memory.delete(firstKey);
+            }
             this.memory.set(key, { data, expiresAt: Date.now() + ttl });
             const waiters = this.inFlight.get(key);
             this.inFlight.delete(key);
@@ -87,7 +97,7 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// فحص حالة القناة (إذا الحقل فارغ نوقف البث)
+// فحص حالة القناة
 // ==========================================
 async function validateMatchStatus(realChannelName) {
     try {
@@ -166,10 +176,8 @@ async function fetchManifest(serverInfo) {
 }
 
 // ==========================================
-// مسارات السيرفر (Routes)
+// المسارات (Routes)
 // ==========================================
-
-// مسار المباريات لربطه بموقعك
 app.get('/api/matches', async (req, res) => {
     try {
         const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -199,7 +207,6 @@ app.get('/api/matches', async (req, res) => {
 
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
-// مسار المشغل
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -213,7 +220,6 @@ app.get('/play/:hash', async (req, res) => {
 
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         
-        // توليد توكن فريد للزائر مربوط بالـ IP وصالح لمدة 10 دقائق
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         
@@ -223,7 +229,6 @@ app.get('/play/:hash', async (req, res) => {
     }
 });
 
-// مسار المانيفست المحمي بالكامل (يمنع ExoPlayer والبرامج الخارجية تماماً)
 app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
         const userAgent = (req.headers['user-agent'] || '').toLowerCase();
@@ -231,20 +236,17 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        // 1. حظر برامج التشغيل الخارجية وأدوات السحب
         const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer'];
         if (blockedAgents.some(agent => userAgent.includes(agent))) {
-            return res.status(403).send('Access Denied: External Players Not Allowed');
+            return res.status(403).send('Access Denied');
         }
 
-        // 2. التحقق من الـ Referer
         const isFromMyHost = referer.includes(host);
         const isFromMainSite = referer.includes(mainHost);
         if (!isFromMyHost && !isFromMainSite) {
-            return res.status(403).send('Access Denied: Direct link access is restricted');
+            return res.status(403).send('Access Denied');
         }
 
-        // 3. التحقق من التوكن المشفر والمربوط بالـ IP وصلاحية 10 دقائق
         const token = req.query.token;
         const userIp = getClientIp(req);
         if (!token || !verifySecureToken(token, userIp)) {
@@ -350,5 +352,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 Ultimate Protected Server running on port ${PORT}`);
+    console.log(`🚀 Bulletproof Production Server running on port ${PORT}`);
 });
