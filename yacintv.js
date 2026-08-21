@@ -70,7 +70,6 @@ const CacheEngine = {
         this.inFlight.set(key, []);
         try {
             const data = await fetcher();
-            // تحديد حد أقصى لعناصر الكاش حتى لا تمتلئ الرامات (حماية إضافية)
             if (this.memory.size > 300) {
                 const firstKey = this.memory.keys().next().value;
                 this.memory.delete(firstKey);
@@ -271,10 +270,12 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// واجهات المستخدم (UI)
+// واجهات المستخدم (UI مع التبديل التلقائي)
 // ==========================================
 function generateUI(channelHash, servers, secureToken) {
     const serverOptions = servers.map((srv, idx) => `<option value="${idx}">${srv.name}</option>`).join('');
+    const totalServers = servers.length;
+    
     return `
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -308,14 +309,44 @@ function generateUI(channelHash, servers, secureToken) {
         const video = document.getElementById('video');
         let hls = null;
         const TOKEN = '${secureToken}';
+        let currentServerIndex = 0;
+        const totalServers = ${totalServers};
+
         function changeServer(serverIndex) {
-            const manifestUrl = '/manifest/${channelHash}/' + serverIndex + '?token=' + encodeURIComponent(TOKEN);
+            currentServerIndex = parseInt(serverIndex);
+            const selectElem = document.getElementById('server-select');
+            if(selectElem) selectElem.value = currentServerIndex;
+
+            const manifestUrl = '/manifest/${channelHash}/' + currentServerIndex + '?token=' + encodeURIComponent(TOKEN);
             if (hls) { hls.destroy(); hls = null; }
+            
             if (Hls.isSupported()) {
-                hls = new Hls(); hls.loadSource(manifestUrl); hls.attachMedia(video);
+                hls = new Hls(); 
+                hls.loadSource(manifestUrl); 
+                hls.attachMedia(video);
+                
                 hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+
+                // 🌟 نظام التبديل التلقائي للسيرفر التالي عند حدوث خطأ بالمشغل
+                hls.on(Hls.Events.ERROR, function (event, data) {
+                    if (data.fatal) {
+                        switch (data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                console.log('Server failed, switching to next server automatically...');
+                                let nextServer = (currentServerIndex + 1) % totalServers;
+                                changeServer(nextServer);
+                                break;
+                            default:
+                                hls.destroy();
+                                break;
+                        }
+                    }
+                });
+
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = manifestUrl; video.addEventListener('loadedmetadata', () => video.play().catch(() => {}));
+                video.src = manifestUrl; 
+                video.addEventListener('loadedmetadata', () => video.play().catch(() => {}));
             }
         }
         changeServer(0);
@@ -352,5 +383,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 Bulletproof Production Server running on port ${PORT}`);
+    console.log(`🚀 Ultimate Bulletproof Server with Auto-Failover running on port ${PORT}`);
 });
