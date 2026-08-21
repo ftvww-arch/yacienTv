@@ -1,35 +1,69 @@
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto'); // أضفنا مكتبة التشفير
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// الإعدادات العامة (يمكنك تغيير الـ API من هنا بسهولة)
+// الإعدادات العامة 
 // ==========================================
 const CONFIG = {
     API_BASE_URL: 'https://s3-1nft.onrender.com/yacintv',
-    CACHE_DURATION: 300000, // 5 دقائق للسيرفرات
-    MANIFEST_CACHE: 2000    // ثانيتين للمانيفست (لضمان عمل الآيفون)
+    CACHE_DURATION: 300000, 
+    MANIFEST_CACHE: 2000,    
+    SECRET_KEY: crypto.randomBytes(32).toString('hex'), // مفتاح سري عشوائي يتغير كل مرة يشتغل فيها السيرفر
+    TOKEN_EXPIRY: 6 * 60 * 60 * 1000, // صلاحية الرابط 6 ساعات
+    // ضع رابط اللوجو الخاص بك هنا
+    LOGO_URL: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/React-icon.svg/120px-React-icon.svg.png' 
 };
+
+// ==========================================
+// نظام التوكن (حماية الروابط من السرقة)
+// ==========================================
+function generateSecureToken(ip) {
+    const expires = Date.now() + CONFIG.TOKEN_EXPIRY;
+    const data = `${ip}:${expires}`;
+    const signature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(data).digest('hex');
+    // إرجاع التوكن بصيغة Base64
+    return Buffer.from(`${data}:${signature}`).toString('base64');
+}
+
+function verifySecureToken(token, userIp) {
+    try {
+        const decoded = Buffer.from(token, 'base64').toString('utf8');
+        const [tokenIp, expires, signature] = decoded.split(':');
+        
+        // 1. التحقق من الوقت
+        if (Date.now() > parseInt(expires)) return false; 
+        
+        // 2. التحقق من صحة التوقيع
+        const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${tokenIp}:${expires}`).digest('hex');
+        if (signature !== expectedSignature) return false;
+
+        // 3. (اختياري) التحقق من الـ IP - إذا أردت ربط البث بشخص واحد فقط
+        // ملاحظة: قمنا بتعطيلها مؤقتاً لأن بعض شبكات 4G تغير الـ IP باستمرار، لكن التوقيع والوقت يكفيان للحماية
+        // if (tokenIp !== userIp) return false; 
+
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// دالة لمعرفة IP المستخدم الحقيقي (حتى لو كان خلف Cloudflare)
+function getClientIp(req) {
+    return req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+}
 
 // ==========================================
 // دوال التشفير وفك التشفير لأسماء القنوات
 // ==========================================
-function encodeId(text) {
-    return Buffer.from(text).toString('hex');
-}
-
-function decodeId(hash) {
-    try {
-        return Buffer.from(hash, 'hex').toString('utf8');
-    } catch (e) {
-        return null;
-    }
-}
+function encodeId(text) { return Buffer.from(text).toString('hex'); }
+function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
 
 // ==========================================
-// 1. محرك الكاش المتقدم (Single Flight)
+// 1. محرك الكاش المتقدم
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -37,30 +71,24 @@ const CacheEngine = {
 
     async getOrFetch(key, fetcher, ttl) {
         const cached = this.memory.get(key);
-        if (cached && cached.expiresAt > Date.now()) {
-            return cached.data;
-        }
+        if (cached && cached.expiresAt > Date.now()) return cached.data;
 
         if (this.inFlight.has(key)) {
-            return new Promise((resolve, reject) => {
-                this.inFlight.get(key).push({ resolve, reject });
-            });
+            return new Promise((resolve, reject) => { this.inFlight.get(key).push({ resolve, reject }); });
         }
 
         this.inFlight.set(key, []);
         try {
             const data = await fetcher();
             this.memory.set(key, { data, expiresAt: Date.now() + ttl });
-            
             const waiters = this.inFlight.get(key);
             this.inFlight.delete(key);
-            waiters.forEach(waiter => waiter.resolve(data));
-            
+            waiters.forEach(w => w.resolve(data));
             return data;
         } catch (error) {
             const waiters = this.inFlight.get(key);
             this.inFlight.delete(key);
-            waiters.forEach(waiter => waiter.reject(error));
+            waiters.forEach(w => w.reject(error));
             throw error;
         }
     }
@@ -74,64 +102,36 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// 2. دوال جلب البيانات (الذكية مع التبديل التلقائي)
+// 2. دوال جلب البيانات
 // ==========================================
 async function fetchChannelServers(realChannelName) {
     const channelId = `live_tv_${realChannelName}`;
     let dataArray = null;
 
-    // 1. المحاولة الأولى (المسار الأول)
     try {
-        const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, {
-            params: { id_live: channelId },
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            timeout: 8000
-        });
-        
-        if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) {
-            dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
-        }
-    } catch (e) {
-        console.log(`[API 1 Failed] Switching to fallback for: ${channelId}`);
-    }
+        const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { params: { id_live: channelId }, headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 8000 });
+        if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
+    } catch (e) { console.log(`API 1 Failed`); }
 
-    // 2. المحاولة الثانية (المسار البديل) في حال فشل الأول أو عاد بفراغ
     if (!dataArray || dataArray.length === 0) {
         try {
-            const response2 = await axios.get(`${CONFIG.API_BASE_URL}/live_id/${channelId}`, {
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                timeout: 8000
-            });
-            
-            if (response2.data) {
-                dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
-            }
-        } catch (e) {
-            console.log(`[API 2 Failed] Could not fetch: ${channelId}`);
-        }
+            const response2 = await axios.get(`${CONFIG.API_BASE_URL}/live_id/${channelId}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 8000 });
+            if (response2.data) dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
+        } catch (e) { console.log(`API 2 Failed`); }
     }
 
-    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات للقناة من المصدرين');
+    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات');
 
     const servers = [];
     dataArray.forEach((srv, i) => {
         if (srv.result !== 0 || !srv.data) return;
         try {
             let rawUrl = srv.data.url;
-            let innerData = typeof rawUrl === 'string' && rawUrl.trim().startsWith('{') 
-                ? JSON.parse(rawUrl.trim()) 
-                : { url: rawUrl.trim() };
-                
-            servers.push({
-                name: srv.name || `سيرفر ${i + 1}`,
-                url: innerData.url,
-                headers: innerData.headers || {},
-                swap: innerData.swap || null
-            });
+            let innerData = typeof rawUrl === 'string' && rawUrl.trim().startsWith('{') ? JSON.parse(rawUrl.trim()) : { url: rawUrl.trim() };
+            servers.push({ name: srv.name || `سيرفر ${i + 1}`, url: innerData.url, headers: innerData.headers || {}, swap: innerData.swap || null });
         } catch (e) {}
     });
-
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات صالحة');
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات');
     return servers;
 }
 
@@ -153,50 +153,51 @@ async function fetchManifest(serverInfo) {
         if (swapKey && url.includes(swapKey)) url = url.replace(swapKey, swapVal);
         return url;
     });
-
     return m3u8;
 }
 
 // ==========================================
 // 3. المسارات (Routes)
 // ==========================================
-
-// مسار مساعد لك لتشفير أسماء القنوات (افتحه في المتصفح للحصول على الكود المشفر)
 app.get('/encrypt/:channelName', (req, res) => {
-    const encrypted = encodeId(req.params.channelName);
-    res.send(`
-        <div style="font-family:sans-serif; text-align:center; margin-top:50px;">
-            <h2>الاسم الأصلي: ${req.params.channelName}</h2>
-            <h1 style="color:green;">الكود المشفر: ${encrypted}</h1>
-            <p>الرابط الخاص بك سيكون: <b>/play/${encrypted}</b></p>
-        </div>
-    `);
+    res.send(`<h1 style="text-align:center; margin-top:50px; color:green;">${encodeId(req.params.channelName)}</h1>`);
 });
 
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
-        const realChannel = decodeId(hash); // فك التشفير داخلياً
-        
+        const realChannel = decodeId(hash);
         if (!realChannel) return res.status(400).send('Invalid Channel ID');
 
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         
-        // نرسل الكود المشفر للواجهة لتبقى القناة الحقيقية مخفية
-        res.send(generateUI(hash, servers)); 
+        // 🌟 هنا نقوم بإنشاء التوكن السري للمستخدم
+        const userIp = getClientIp(req);
+        const secureToken = generateSecureToken(userIp);
+        
+        // نرسل التوكن للواجهة
+        res.send(generateUI(hash, servers, secureToken)); 
     } catch (error) {
         res.status(500).send('<h3 style="text-align:center;margin-top:50px;">القناة غير متوفرة حالياً</h3>');
     }
 });
 
+// 🌟 مسار جلب البث الآن محمي بالتوكن!
 app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
+        const providedToken = req.query.token;
+        const userIp = getClientIp(req);
+
+        // إذا لم يكن هناك توكن، أو التوكن مزيف/منتهي الصلاحية، يتم الطرد!
+        if (!providedToken || !verifySecureToken(providedToken, userIp)) {
+            return res.status(403).send('Access Denied: Invalid or Expired Token. لا تحاول سرقة البث!');
+        }
+
         const { hash, serverIndex } = req.params;
         const realChannel = decodeId(hash);
         if (!realChannel) throw new Error('Invalid ID');
 
         const cacheKey = `manifest_${realChannel}_${serverIndex}`;
-        
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const serverInfo = servers[parseInt(serverIndex)];
         if (!serverInfo) throw new Error('السيرفر غير موجود');
@@ -206,9 +207,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Pragma', 'no-cache');
-        res.setHeader('Expires', '0');
-        
         res.send(manifestData);
     } catch (error) {
         res.status(500).send('Manifest Error');
@@ -216,9 +214,9 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// 4. واجهة المستخدم 
+// 4. واجهة المستخدم (التصميم)
 // ==========================================
-function generateUI(channelHash, servers) {
+function generateUI(channelHash, servers, secureToken) {
     const serverOptions = servers.map((srv, idx) => `<option value="${idx}">${srv.name}</option>`).join('');
 
     return `
@@ -227,24 +225,26 @@ function generateUI(channelHash, servers) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Live Stream</title>
+    <title>YTPlus Live Stream</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
-        body { 
-            margin: 0; padding: 0; background-color: #000; overflow: hidden; font-family: Arial, sans-serif; color: #fff;
-        }
-        #top-bar {
-            position: absolute; top: 0; left: 0; width: 100%; height: 60px;
-            background-color: #0d2741; display: flex; justify-content: space-between; align-items: center;
-            padding: 0 15px; box-sizing: border-box; z-index: 10; border-bottom: 2px solid #FFD700;
-        }
+        body { margin: 0; padding: 0; background-color: #000; overflow: hidden; font-family: Arial, sans-serif; color: #fff; }
+        #top-bar { position: absolute; top: 0; left: 0; width: 100%; height: 60px; background-color: #0d2741; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; box-sizing: border-box; z-index: 10; border-bottom: 2px solid #FFD700; }
         .site-title { font-size: 18px; font-weight: bold; color: #FFD700; }
-        .server-selector {
-            background-color: #000; color: #FFD700; border: 1px solid #FFD700;
-            padding: 8px; border-radius: 4px; font-size: 14px; outline: none; cursor: pointer;
-        }
+        .server-selector { background-color: #000; color: #FFD700; border: 1px solid #FFD700; padding: 8px; border-radius: 4px; font-size: 14px; outline: none; cursor: pointer; }
         #video-container { position: absolute; top: 60px; bottom: 0; width: 100%; background: #000; }
         video { width: 100%; height: 100%; object-fit: contain; }
+        
+        /* 🌟 كود اللوجو العائم فوق المشغل */
+        .player-watermark {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 80px; /* حجم اللوجو */
+            opacity: 0.8; /* شفافية اللوجو */
+            z-index: 5;
+            pointer-events: none; /* مهم جداً: يمنع اللوجو من إعاقة النقر على الفيديو */
+        }
     </style>
 </head>
 <body>
@@ -254,22 +254,25 @@ function generateUI(channelHash, servers) {
             ${serverOptions}
         </select>
     </div>
+    
     <div id="video-container">
+        <!-- 🌟 اللوجو العائم -->
+        <img src="${CONFIG.LOGO_URL}" class="player-watermark" alt="Logo">
+        
         <video id="video" controls playsinline webkit-playsinline autoplay></video>
     </div>
 
     <script>
         const video = document.getElementById('video');
         let hls = null;
+        // استلام التوكن من السيرفر
+        const SECURITY_TOKEN = '${secureToken}'; 
 
         function changeServer(serverIndex) {
-            // نستخدم الكود المشفر لجلب البث
-            const manifestUrl = '/manifest/${channelHash}/' + serverIndex;
+            // إضافة التوكن للرابط كـ Query Parameter
+            const manifestUrl = '/manifest/${channelHash}/' + serverIndex + '?token=' + encodeURIComponent(SECURITY_TOKEN);
 
-            if (hls) {
-                hls.destroy();
-                hls = null;
-            }
+            if (hls) { hls.destroy(); hls = null; }
 
             if (Hls.isSupported()) {
                 hls = new Hls();
@@ -278,8 +281,7 @@ function generateUI(channelHash, servers) {
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
                     video.play().catch(e => console.log('Autoplay prevented'));
                 });
-            } 
-            else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = manifestUrl;
                 video.addEventListener('loadedmetadata', function() {
                     video.play().catch(e => console.log('Autoplay prevented'));
@@ -294,5 +296,5 @@ function generateUI(channelHash, servers) {
 }
 
 app.listen(PORT, () => {
-    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`✅ Secure Server running on port ${PORT}`);
 });
