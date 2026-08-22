@@ -38,9 +38,7 @@ function verifySecureToken(token, ip) {
         if (Date.now() > parseInt(expires)) return false; 
         const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${tokenIp}:${expires}`).digest('hex');
         return signature === expectedSignature && tokenIp === ip;
-    } catch (e) {
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 function getClientIp(req) { 
@@ -109,9 +107,7 @@ async function getMatchInfo(realChannelName) {
         if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
 
         return { isAvailable: true, title: matchTitle };
-    } catch (e) {
-        return { isAvailable: true, title: realChannelName }; 
-    }
+    } catch (e) { return { isAvailable: true, title: realChannelName }; }
 }
 
 async function fetchChannelServers(realChannelName) {
@@ -237,10 +233,9 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// 6. واجهة المستخدم المحدثة والاحترافية
+// 6. واجهة المستخدم (تصميم الزجاج العائم المطور)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
-    const totalServers = servers.length;
     const embedUrl = `${hostUrl}/play/${channelHash}`;
 
     const serverItemsHtml = servers.map((srv, idx) => `
@@ -261,11 +256,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
         :root {
-            --primary: #e50914; /* أحمر احترافي مثل نتفليكس/يوتيوب */
+            --primary: #e50914; 
             --bg-dark: #000;
+            --glass-bg: rgba(20, 20, 20, 0.65);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --glass-hover: rgba(255, 255, 255, 0.2);
             --text-light: #fff;
-            --ui-gradient-bottom: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
-            --ui-gradient-top: linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%);
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -278,99 +274,108 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 1; }
 
-        /* طبقة الواجهة والتدرج اللوني */
+        /* طبقة الواجهة */
         .ui-layer {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10;
-            display: flex; flex-direction: column; justify-content: space-between;
-            transition: opacity 0.3s ease; opacity: 1; pointer-events: none;
+            pointer-events: none; /* للسماح بالنقر على الفيديو في المنتصف */
         }
-        .player-container.idle .ui-layer { opacity: 0; }
-        .player-container.idle { cursor: none; }
 
-        .ui-layer > * { pointer-events: auto; } /* تفعيل النقر على أشرطة التحكم */
+        /* التصميم الزجاجي المشترك للأشرطة */
+        .glass-bar {
+            position: absolute; left: 2%; right: 2%;
+            background: var(--glass-bg); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border); border-radius: 16px;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 20px; transition: opacity 0.4s ease, transform 0.4s ease;
+            pointer-events: auto; /* تفعيل النقر داخل الأشرطة */
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        }
 
         /* الشريط العلوي */
-        .top-bar { padding: 20px 24px; background: var(--ui-gradient-top); display: flex; align-items: center; width: 100%; }
-        .logo { color: var(--primary); font-weight: 800; font-size: 20px; text-decoration: none; margin-left: 15px; letter-spacing: 1px; font-family: sans-serif;}
-        .video-title { color: var(--text-light); font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+        .top-bar { top: 20px; }
+        .player-container.idle .top-bar { opacity: 0; transform: translateY(-30px); }
+        
+        .video-title { color: var(--text-light); font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 75%; }
+        .logo { color: var(--primary); font-weight: 800; font-size: 18px; text-decoration: none; font-family: sans-serif; letter-spacing: 1px; }
 
-        /* الشريط السفلي - عناصر تحكم مدمجة */
-        .bottom-bar { padding: 0 16px 16px 16px; background: var(--ui-gradient-bottom); display: flex; flex-direction: column; justify-content: flex-end; width: 100%; height: 100px; }
-        
-        .controls-row { display: flex; align-items: center; justify-content: space-between; height: 48px; }
-        
-        .left-controls, .right-controls { display: flex; align-items: center; gap: 8px; }
-        
-        /* أزرار التحكم القياسية */
-        .control-btn {
-            background: transparent; border: none; cursor: pointer; color: var(--text-light);
+        /* الشريط السفلي */
+        .bottom-bar { bottom: 20px; }
+        .player-container.idle .bottom-bar { opacity: 0; transform: translateY(30px); }
+
+        .controls-group { display: flex; align-items: center; gap: 12px; }
+
+        /* الأزرار الزجاجية */
+        .glass-btn {
+            background: rgba(255, 255, 255, 0.08); border: 1px solid transparent; color: var(--text-light);
             width: 44px; height: 44px; border-radius: 50%; display: flex; justify-content: center; align-items: center;
-            transition: background 0.2s;
+            cursor: pointer; transition: all 0.2s ease;
         }
-        .control-btn:hover { background: rgba(255,255,255,0.15); }
-        .control-btn svg { fill: currentColor; width: 26px; height: 26px; }
+        .glass-btn:hover { background: var(--glass-hover); border-color: rgba(255,255,255,0.2); transform: scale(1.05); }
+        .glass-btn svg { fill: currentColor; width: 24px; height: 24px; }
+        
+        /* زر التشغيل الأساسي */
+        .play-btn { background: var(--primary); color: white; box-shadow: 0 4px 15px rgba(229, 9, 20, 0.4); }
+        .play-btn:hover { background: #ff0f1a; border-color: transparent; }
 
         /* مؤشر البث المباشر */
         .live-badge {
-            display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.4); padding: 4px 10px;
-            border-radius: 6px; color: #fff; font-size: 14px; font-weight: 700; border: 1px solid rgba(255,255,255,0.1);
+            display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; color: #fff; font-size: 14px; font-weight: 700; border: 1px solid rgba(255,255,255,0.05);
         }
         .live-dot { width: 8px; height: 8px; background-color: var(--primary); border-radius: 50%; animation: pulse 1.5s infinite; }
 
-        /* نافذة الجودة المنبثقة (تشبه يوتيوب) */
+        /* نافذة الجودة المنبثقة (زجاجية أيضاً) */
         .settings-menu {
-            position: absolute; bottom: 70px; left: 16px; /* من اليسار لأن الواجهة RTL */
-            background: rgba(28, 28, 28, 0.95); backdrop-filter: blur(10px);
-            border-radius: 12px; min-width: 200px; max-height: 300px; overflow-y: auto;
-            color: #fff; z-index: 50; display: none; border: 1px solid rgba(255,255,255,0.1);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.7); animation: slideUpFade 0.2s ease-out forwards;
+            position: absolute; bottom: 85px; left: 2%; 
+            background: var(--glass-bg); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px);
+            border: 1px solid var(--glass-border); border-radius: 16px;
+            min-width: 220px; max-height: 250px; overflow-y: auto; color: #fff; z-index: 50; display: none;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5); animation: scaleUp 0.2s ease-out forwards;
+            pointer-events: auto; transform-origin: bottom left;
         }
-        .settings-header { padding: 12px 16px; font-size: 14px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.1); color: #aaa; display: flex; align-items: center; gap: 8px; }
-        .settings-header svg { width: 16px; height: 16px; fill: #aaa; cursor: pointer; }
+        .settings-header { padding: 14px 16px; font-size: 15px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.08); color: #ccc; display: flex; align-items: center; gap: 8px; }
         .quality-item { padding: 12px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; transition: background 0.2s; font-size: 14px; font-weight: 500; }
         .quality-item:hover { background: rgba(255,255,255,0.1); }
         .quality-item .check-icon { width: 18px; height: 18px; fill: var(--primary); opacity: 0; }
         .quality-item.active .check-icon { opacity: 1; }
 
-        /* شاشة التحميل */
-        .loading-overlay {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #000;
-            display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 20;
-            transition: opacity 0.4s;
-        }
-        .spinner { width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.2); border-left-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+        /* شاشة التحميل وأيقونة النقر بالمنتصف */
+        .loading-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: flex; justify-content: center; align-items: center; z-index: 20; transition: opacity 0.4s; pointer-events: none; }
+        .spinner { width: 48px; height: 48px; border: 4px solid rgba(255,255,255,0.1); border-left-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
 
-        /* أيقونة الحالة في المنتصف (التشغيل/الإيقاف المؤقت عند النقر) */
         .center-action-icon {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(1.5);
-            width: 64px; height: 64px; background: rgba(0,0,0,0.6); border-radius: 50%;
+            width: 70px; height: 70px; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); border-radius: 50%;
             display: flex; justify-content: center; align-items: center; color: white;
             opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; z-index: 15;
         }
-        .center-action-icon svg { width: 32px; height: 32px; fill: #fff; }
+        .center-action-icon svg { width: 36px; height: 36px; fill: #fff; }
         .center-action-icon.animate-action { opacity: 1; transform: translate(-50%, -50%) scale(1); animation: fadeOutAction 0.6s forwards; }
 
-        /* التضمين (Modal) */
-        .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); justify-content: center; align-items: center; }
-        .modal-content { background: #1a1a1a; border-radius: 12px; padding: 24px; width: 90%; max-width: 450px; color: white; border: 1px solid #333; }
+        /* نافذة التضمين (Modal) */
+        .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); backdrop-filter: blur(5px); justify-content: center; align-items: center; }
+        .modal-content { background: #1a1a1a; border-radius: 16px; padding: 24px; width: 90%; max-width: 450px; color: white; border: 1px solid #333; }
         .modal-header { display: flex; justify-content: space-between; margin-bottom: 15px; }
         .close-modal { background: none; border: none; color: #fff; font-size: 24px; cursor: pointer; }
-        textarea.embed-code { width: 100%; height: 100px; background: #000; color: #fff; padding: 10px; border: 1px solid #444; border-radius: 8px; resize: none; margin-bottom: 15px; font-family: monospace; direction: ltr;}
-        .copy-btn { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 8px; font-weight: 700; font-family: 'Tajawal'; cursor: pointer; }
+        textarea.embed-code { width: 100%; height: 100px; background: #000; color: #fff; padding: 12px; border: 1px solid #444; border-radius: 10px; resize: none; margin-bottom: 15px; font-family: monospace; direction: ltr;}
+        .copy-btn { width: 100%; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 10px; font-weight: 700; font-family: 'Tajawal'; cursor: pointer; font-size: 16px; }
 
         /* Scrollbar */
-        .settings-menu::-webkit-scrollbar { width: 6px; }
-        .settings-menu::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.3); border-radius: 10px; }
+        .settings-menu::-webkit-scrollbar { width: 5px; }
+        .settings-menu::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 10px; }
 
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 50% { opacity: 0.4; } }
-        @keyframes slideUpFade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes fadeOutAction { 0% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); } }
+        @keyframes scaleUp { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        @keyframes fadeOutAction { 0% { opacity: 1; transform: translate(-50%, -50%) scale(1); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.4); } }
 
         @media (max-width: 600px) {
-            .bottom-bar { padding: 0 10px 10px 10px; }
-            .control-btn { width: 38px; height: 38px; }
-            .logo { font-size: 18px; }
+            .glass-bar { left: 3%; right: 3%; padding: 10px 15px; border-radius: 12px; }
+            .top-bar { top: 15px; }
+            .bottom-bar { bottom: 15px; }
+            .glass-btn { width: 38px; height: 38px; }
+            .glass-btn svg { width: 20px; height: 20px; }
+            .logo { font-size: 16px; }
             .video-title { font-size: 14px; }
         }
     </style>
@@ -380,54 +385,50 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <div class="player-container" id="playerContainer">
         
         <div id="loadingOverlay" class="loading-overlay"><div class="spinner"></div></div>
-        
         <video id="video" playsinline webkit-playsinline autoplay></video>
-
-        <!-- نافذة الجودة مدمجة ضمن إطار المشغل -->
-        <div class="settings-menu" id="settingsMenu">
-            <div class="settings-header">
-                <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg> الجودة
-            </div>
-            ${serverItemsHtml}
-        </div>
-
-        <!-- أيقونة الحالة (تظهر عند النقر على الشاشة) -->
         <div class="center-action-icon" id="centerAction"></div>
 
         <div class="ui-layer" id="uiLayer">
-            <!-- الهيدر -->
-            <div class="top-bar">
+            
+            <!-- الشريط الزجاجي العلوي -->
+            <div class="glass-bar top-bar">
                 <div class="video-title" dir="rtl">${matchTitle}</div>
                 <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo">YTPlus</a>
             </div>
             
-            <!-- الفوتر (أزرار التحكم) -->
-            <div class="bottom-bar">
-                <div class="controls-row">
-                    
-                    <!-- الأزرار اليمنى (تشغيل ولايف) -->
-                    <div class="right-controls">
-                        <button class="control-btn" id="playPauseBtn" title="تشغيل / إيقاف">
-                            <svg id="icon-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                            <svg id="icon-play" viewBox="0 0 24 24" style="display:none;"><path d="M8 5v14l11-7z"/></svg>
-                        </button>
-                        <div class="live-badge"><div class="live-dot"></div> مباشر</div>
-                    </div>
-
-                    <!-- الأزرار اليسرى (إعدادات، تضمين، شاشة كاملة) -->
-                    <div class="left-controls">
-                        <button class="control-btn" id="settingsBtn" title="الجودة">
-                            <svg viewBox="0 0 24 24"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.73,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>
-                        </button>
-                        <button class="control-btn" id="embedBtn" title="تضمين">
-                            <svg viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
-                        </button>
-                        <button class="control-btn" id="fullscreenBtn" title="شاشة كاملة">
-                            <svg id="icon-fs-enter" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
-                        </button>
-                    </div>
+            <!-- الشريط الزجاجي السفلي -->
+            <div class="glass-bar bottom-bar">
+                
+                <!-- الأزرار اليسرى (إعدادات، تضمين، شاشة كاملة) -->
+                <div class="controls-group">
+                    <button class="glass-btn" id="settingsBtn" title="الجودة">
+                        <svg viewBox="0 0 24 24"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.73,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>
+                    </button>
+                    <button class="glass-btn" id="embedBtn" title="تضمين">
+                        <svg viewBox="0 0 24 24"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/></svg>
+                    </button>
+                    <button class="glass-btn" id="fullscreenBtn" title="شاشة كاملة">
+                        <svg id="icon-fs-enter" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+                    </button>
                 </div>
+
+                <!-- الأزرار اليمنى (مباشر، تشغيل) -->
+                <div class="controls-group">
+                    <div class="live-badge"><div class="live-dot"></div> مباشر</div>
+                    <button class="glass-btn play-btn" id="playPauseBtn" title="تشغيل / إيقاف">
+                        <svg id="icon-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                        <svg id="icon-play" viewBox="0 0 24 24" style="display:none;"><path d="M8 5v14l11-7z"/></svg>
+                    </button>
+                </div>
+
             </div>
+
+            <!-- قائمة الجودة الزجاجية -->
+            <div class="settings-menu" id="settingsMenu">
+                <div class="settings-header">اختر الجودة</div>
+                ${serverItemsHtml}
+            </div>
+
         </div>
     </div>
 
@@ -446,11 +447,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <script>
         const video = document.getElementById('video');
         const container = document.getElementById('playerContainer');
-        const uiLayer = document.getElementById('uiLayer');
         const loadingOverlay = document.getElementById('loadingOverlay');
         const playPauseBtn = document.getElementById('playPauseBtn');
-        const iconPlay = document.getElementById('iconPlay');
-        const iconPause = document.getElementById('iconPause');
         const settingsBtn = document.getElementById('settingsBtn');
         const settingsMenu = document.getElementById('settingsMenu');
         const fullscreenBtn = document.getElementById('fullscreenBtn');
@@ -459,7 +457,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let hls = null;
         const TOKEN = '${secureToken}';
         const channelHash = '${channelHash}';
-        let currentServerIndex = 0;
         
         // نظام الإعلانات المخفية الآمن
         const smartLinks = ['https://omg10.com/4/7056731', 'https://omg10.com/4/7436731'];
@@ -475,20 +472,20 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         }
 
-        // --- التحكم في واجهة المستخدم (الإخفاء التلقائي) ---
+        // --- التحكم في إخفاء الأشرطة الزجاجية التلقائي ---
         let idleTimer;
         function resetIdleTimer() {
             container.classList.remove('idle');
             clearTimeout(idleTimer);
             if (!video.paused && settingsMenu.style.display !== 'block') {
-                idleTimer = setTimeout(() => container.classList.add('idle'), 2500);
+                idleTimer = setTimeout(() => container.classList.add('idle'), 3000);
             }
         }
         container.addEventListener('mousemove', resetIdleTimer);
         container.addEventListener('touchmove', resetIdleTimer);
         container.addEventListener('touchstart', resetIdleTimer);
 
-        // --- إيماءات التحكم (Gestures) ---
+        // --- إيماءات التحكم (Gestures) عبر الفيديو ---
         let clickCount = 0;
         let singleClickTimer;
         
@@ -506,18 +503,13 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             triggerSmartAd();
             clickCount++;
             if (clickCount === 1) {
-                singleClickTimer = setTimeout(() => {
-                    togglePlay();
-                    clickCount = 0;
-                }, 250); 
+                singleClickTimer = setTimeout(() => { togglePlay(); clickCount = 0; }, 250); 
             } else if (clickCount === 2) {
-                clearTimeout(singleClickTimer);
-                toggleFullscreen();
-                clickCount = 0;
+                clearTimeout(singleClickTimer); toggleFullscreen(); clickCount = 0;
             }
         });
 
-        // --- وظائف الأزرار الأساسية ---
+        // --- وظائف الأزرار ---
         function togglePlay() {
             if (video.paused) { video.play(); showCenterAction('play'); } 
             else { video.pause(); showCenterAction('pause'); }
@@ -543,14 +535,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         }
         fullscreenBtn.addEventListener('click', (e) => { e.stopPropagation(); triggerSmartAd(); toggleFullscreen(); });
 
-        // --- قائمة الجودة (Settings) ---
+        // --- قائمة الجودة ---
         settingsBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             settingsMenu.style.display = settingsMenu.style.display === 'block' ? 'none' : 'block';
             resetIdleTimer();
         });
-        
-        document.querySelector('.settings-header').addEventListener('click', () => settingsMenu.style.display = 'none');
 
         document.querySelectorAll('.quality-item').forEach(item => {
             item.addEventListener('click', (e) => {
@@ -562,11 +552,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             });
         });
 
-        // إغلاق القوائم عند النقر خارجها
         window.addEventListener('click', (e) => {
-            if (!settingsMenu.contains(e.target) && !settingsBtn.contains(e.target)) {
-                settingsMenu.style.display = 'none';
-            }
+            if (!settingsMenu.contains(e.target) && !settingsBtn.contains(e.target)) { settingsMenu.style.display = 'none'; }
         });
 
         // --- التضمين ---
@@ -578,7 +565,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             this.innerText = 'تم النسخ بنجاح!'; setTimeout(() => this.innerText = 'نسخ الكود', 2000);
         });
 
-        // --- HLS & Server Logic ---
+        // --- HLS Logic ---
         function changeServer(index) {
             loadingOverlay.style.display = 'flex'; loadingOverlay.style.opacity = '1';
             settingsMenu.style.display = 'none';
@@ -587,32 +574,20 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
-                hls = new Hls({ maxBufferLength: 30, maxMaxBufferLength: 60 }); 
+                hls = new Hls({ maxBufferLength: 30 }); 
                 hls.loadSource(manifestUrl); hls.attachMedia(video);
-                
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play().then(() => { loadingOverlay.style.opacity = '0'; setTimeout(()=>loadingOverlay.style.display='none',300); }).catch(e=>{});
-                });
-
-                hls.on(Hls.Events.ERROR, function(e, data) {
-                    if (data.fatal) {
-                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) { hls.startLoad(); }
-                        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) { hls.recoverMediaError(); }
-                        else { hls.destroy(); }
-                    }
+                    video.play().then(() => { loadingOverlay.style.opacity = '0'; setTimeout(()=>loadingOverlay.style.display='none',400); }).catch(e=>{});
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = manifestUrl; 
                 video.addEventListener('loadedmetadata', () => {
-                    video.play().then(() => { loadingOverlay.style.opacity = '0'; setTimeout(()=>loadingOverlay.style.display='none',300); }).catch(e=>{});
+                    video.play().then(() => { loadingOverlay.style.opacity = '0'; setTimeout(()=>loadingOverlay.style.display='none',400); }).catch(e=>{});
                 });
             }
         }
 
-        // تشغيل السيرفر الافتراضي
         changeServer(0);
-        
-        // إعادة التحميل التلقائي بعد 10 دقائق لضمان استقرار التوكن
         setTimeout(() => location.reload(), 10 * 60 * 1000);
     </script>
 </body>
@@ -629,10 +604,11 @@ function generateOfflineUI(reasonMsg) {
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@500;700;800&display=swap" rel="stylesheet">
     <style>
         body { margin: 0; background-color: #000; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Tajawal', sans-serif; }
-        .container { text-align: center; background: #111; padding: 40px; border-radius: 12px; border: 1px solid #222; width: 90%; max-width: 400px; }
+        .container { text-align: center; background: rgba(20, 20, 20, 0.65); backdrop-filter: blur(12px); padding: 40px; border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.1); width: 90%; max-width: 400px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); }
         h2 { color: #fff; margin-bottom: 10px; font-size: 20px; }
-        .reason { color: #aaa; font-size: 14px; margin-bottom: 25px; }
-        .btn { display: inline-block; background: #e50914; color: #fff; padding: 12px 24px; text-decoration: none; font-weight: 700; border-radius: 8px; }
+        .reason { color: #ccc; font-size: 14px; margin-bottom: 25px; }
+        .btn { display: inline-block; background: #e50914; color: #fff; padding: 12px 24px; text-decoration: none; font-weight: 700; border-radius: 10px; transition: 0.2s; }
+        .btn:hover { background: #ff0f1a; transform: scale(1.05); }
     </style>
 </head>
 <body>
