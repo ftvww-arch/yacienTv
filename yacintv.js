@@ -186,7 +186,11 @@ app.get('/api/matches', async (req, res) => {
             let channelStr = match.channel || match.id_live || '';
             let cleanChannel = channelStr.startsWith('live_tv_') ? channelStr.replace('live_tv_', '') : channelStr;
             let embedUrl = cleanChannel ? `${hostUrl}/play/${encodeId(cleanChannel)}` : '';
-            return { ...match, URl: embedUrl };
+            
+            // استبعاد id_live و channel نهائياً من البيانات المرسلة للعميل
+            const { id_live, channel, ...safeMatch } = match;
+            
+            return { ...safeMatch, URl: embedUrl };
         });
 
         res.setHeader('Access-Control-Allow-Origin', '*');
