@@ -506,7 +506,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let currentServerIndex = 0;
         const totalServers = ${totalServers};
 
-        // نظام الإعلانات الذكية العشوائية (Smart Links)
+       // نظام الإعلانات الذكية المحسّن (لتجاوز حظر النوافذ المنبثقة)
         const smartLinks = [
             'https://omg10.com/4/7056731',
             'https://omg10.com/4/7056731'
@@ -517,7 +517,15 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (!adOpened) {
                 adOpened = true;
                 const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                window.open(randomUrl, '_blank');
+                
+                // إنشاء عنصر رابط وهمي ومحاكاة نقرة حقيقية لتجنب حظر المتصفح
+                const anchor = document.createElement('a');
+                anchor.href = randomUrl;
+                anchor.target = '_blank';
+                anchor.rel = 'noopener noreferrer';
+                document.body.appendChild(anchor);
+                anchor.click();
+                document.body.removeChild(anchor);
             }
         }
 
