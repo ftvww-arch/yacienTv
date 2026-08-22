@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 // الإعدادات العامة 
 // ==========================================
 const CONFIG = {
-    API_BASE_URL: 'https://s3-1nft.onrender.com/yacintv',
+    API_BASE_URL: 'https://yacientv-production.up.railway.app/yacintv',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
