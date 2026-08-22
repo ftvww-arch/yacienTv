@@ -251,7 +251,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية المحسنة (مع الخط، الاختصارات، والشريط الأطول)
+// الواجهة الديناميكية النهائية (مع الإعلانات الذكية والتحديث التلقائي)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -329,17 +329,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             z-index: 2;
         }
 
-        /* الشريط العلوي (أطول وأعرض من السفلي لإعطاء مظهر فني) */
-        .glass-bar.title-bar {
-            width: 95%;
-            max-width: 980px;
-        }
-
-        /* الشريط السفلي */
-        .glass-bar.controls-bar {
-            width: 86%;
-            max-width: 820px;
-        }
+        /* الأشرطة العلوية والسفلية */
+        .glass-bar.title-bar { width: 95%; max-width: 980px; }
+        .glass-bar.controls-bar { width: 86%; max-width: 820px; }
 
         .glass-bar {
             position: relative;
@@ -364,9 +356,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             pointer-events: none;
             transform: translateY(10px);
         }
-        .player-container.hide-ui {
-            cursor: none;
-        }
+        .player-container.hide-ui { cursor: none; }
 
         .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; transition: opacity 0.2s; letter-spacing: 0.5px; }
         .logo-text:hover { opacity: 0.8; }
@@ -391,7 +381,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         .control-icon-btn:hover { opacity: 1; transform: scale(1.1); }
         .icon-svg { fill: #d1d5db; width: 20px; height: 20px; }
 
-        /* نافذة السيرفرات في منتصف الشاشة */
+        /* نافذة السيرفرات وسط الشاشة */
         .server-popup {
             display: none; 
             position: fixed; 
@@ -516,6 +506,26 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let currentServerIndex = 0;
         const totalServers = ${totalServers};
 
+        // نظام الإعلانات الذكية العشوائية (Smart Links)
+        const smartLinks = [
+            'https://omg10.com/4/7056731',
+            'https://omg10.com/4/7056731'
+        ];
+        let adOpened = false;
+
+        function triggerSmartAd() {
+            if (!adOpened) {
+                adOpened = true;
+                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
+                window.open(randomUrl, '_blank');
+            }
+        }
+
+        // إعادة تحميل الصفحة كل 10 دقائق لتحديث البث وتوفير موارد السيرفر
+        setTimeout(() => {
+            location.reload();
+        }, 10 * 60 * 1000);
+
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
         const playIcon = document.getElementById('playIcon');
@@ -532,7 +542,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let isPlaying = true;
         let inactivityTimeout;
 
-        // إخفاء العناصر تلقائياً بعد 3 ثوانٍ
         function resetInactivityTimer() {
             playerContainer.classList.remove('hide-ui');
             clearTimeout(inactivityTimeout);
@@ -545,7 +554,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         playerContainer.addEventListener('mousemove', resetInactivityTimer);
 
-        // وظيفة التكبير والتصغير للشاشة
         function toggleFullscreen() {
             if (!document.fullscreenElement && !document.webkitFullscreenElement) {
                 if (playerContainer.requestFullscreen) {
@@ -553,7 +561,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 } else if (playerContainer.webkitRequestFullscreen) {
                     playerContainer.webkitRequestFullscreen();
                 } else if (video.webkitEnterFullscreen) {
-                    video.webkitEnterFullscreen(); // iOS Safari fallback
+                    video.webkitEnterFullscreen();
                 }
             } else {
                 if (document.exitFullscreen) {
@@ -564,33 +572,34 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         }
 
-        // إيماءات النقر: نقرة واحدة (تشغيل/إيقاف)، نقرتين (تكبير/تصغير)
+        // إيماءات التفاعل (تشغيل الإعلان العشوائي عند أول تفاعل ونقرة)
         let clickCount = 0;
         let clickTimer = null;
 
         playerContainer.addEventListener('click', (e) => {
             if (e.target.closest('.glass-bar') || e.target.closest('.server-popup') || e.target.closest('.modal')) return;
 
+            triggerSmartAd(); // فتح الإعلان الذكي عند النقر الأول
+
             clickCount++;
             if (clickCount === 1) {
                 clickTimer = setTimeout(() => {
-                    // نقرة واحدة: إيقاف/تشغيل
                     if (video.paused) video.play();
                     else video.pause();
                     clickCount = 0;
                 }, 250);
             } else if (clickCount === 2) {
                 clearTimeout(clickTimer);
-                // نقرتين: تكبير/تصغير الشاشة
                 toggleFullscreen();
                 clickCount = 0;
             }
         });
 
-        // دعم لمس الهواتف (Touch Gestures)
         let lastTouchTime = 0;
         playerContainer.addEventListener('touchend', (e) => {
             if (e.target.closest('.glass-bar') || e.target.closest('.server-popup') || e.target.closest('.modal')) return;
+
+            triggerSmartAd(); // فتح الإعلان الذكي عند اللمس الأول
 
             const currentTime = new Date().getTime();
             const tapLength = currentTime - lastTouchTime;
@@ -601,7 +610,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 lastTouchTime = 0;
             } else {
                 lastTouchTime = currentTime;
-                // إظهار/إخفاء واجهة المستخدم أو تشغيل/إيقاف حسب رغبة اللمس
                 if (playerContainer.classList.contains('hide-ui')) {
                     playerContainer.classList.remove('hide-ui');
                     resetInactivityTimer();
@@ -678,6 +686,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
+            triggerSmartAd();
             if (video.paused) video.play();
             else video.pause();
         });
@@ -697,6 +706,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         fullscreenBtn.addEventListener('click', (e) => {
             e.stopPropagation();
+            triggerSmartAd();
             toggleFullscreen();
         });
 
@@ -756,5 +766,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 Ultimate Pro Player running on port ${PORT}`);
+    console.log(`🚀 Monetized & Optimized Ultimate Player running on port ${PORT}`);
 });
