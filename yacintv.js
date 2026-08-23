@@ -51,7 +51,7 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
-    TOKEN_EXPIRY: 10 * 60 * 1000,
+    TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
     MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
 };
 
@@ -238,6 +238,15 @@ app.get('/api/matches', async (req, res) => {
 
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
+// مسار تجديد التوكن في الخلفية دون قطع البث أو إعادة التحميل
+app.get('/api/refresh-token', (req, res) => {
+    const userIp = getClientIp(req);
+    const newToken = generateSecureToken(userIp);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.json({ token: newToken });
+});
+
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -291,7 +300,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية النهائية (المشغل مع الحماية المضاعفة)
+// الواجهة الديناميكية النهائية (المشغل مع التجديد الذاتي للتوكن)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -515,7 +524,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         const loadingOverlay = document.getElementById('loadingOverlay');
         const titleBar = document.getElementById('titleBar');
         let hls = null;
-        const TOKEN = '${secureToken}';
+        
+        // المتغيرات للتوكن وتجديدها ديناميكياً
+        let currentToken = '${secureToken}';
         const channelHash = '${channelHash}';
         const totalServers = ${totalServers};
         
@@ -523,6 +534,26 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let isPlaying = true;
         let autoSwitchEnabled = true; 
         let serversTested = 0; 
+
+        // نظام التجديد التلقائي للتوكن في الخلفية كل 8 دقائق
+        setInterval(async () => {
+            try {
+                const response = await fetch('/api/refresh-token');
+                const data = await response.json();
+                if (data && data.token) {
+                    currentToken = data.token;
+                    console.log("تم تجديد التوكن بنجاح في الخلفية");
+                    
+                    // تحديث الرابط للمشغل بشكل صامت ودون أي انقطاع
+                    if (hls) {
+                        const newManifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
+                        hls.loadSource(newManifestUrl);
+                    }
+                }
+            } catch (e) {
+                console.error("فشل تجديد التوكن");
+            }
+        }, 8 * 60 * 1000);
 
         // الإعلانات الذكية وتحويلات F12
         const smartLinks = [
@@ -552,7 +583,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         document.addEventListener('click', triggerSmartAd, { capture: true });
         document.addEventListener('touchend', triggerSmartAd, { capture: true });
 
-        // حماية متقدمة: رصد فتح أدوات المطورين (F12 / DevTools) وتحويلهم للإعلانات
         let devtoolsOpen = false;
         const threshold = 160;
         setInterval(() => {
@@ -677,7 +707,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 else item.classList.remove('active');
             });
 
-            const manifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(TOKEN);
+            const manifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
@@ -698,7 +728,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     if (data.fatal) {
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
+                                hls.startLoad();
+                                break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
+                                hls.recoverMediaError();
+                                break;
+                            default:
                                 if (autoSwitchEnabled && serversTested < totalServers) {
                                     let nextServer = (currentServerIndex + 1) % totalServers;
                                     changeServer(nextServer, false); 
@@ -707,11 +742,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                                     hls.destroy();
                                     hideLoading();
                                 }
-                                break;
-                            default:
-                                autoSwitchEnabled = false;
-                                hls.destroy();
-                                hideLoading();
                                 break;
                         }
                     }
