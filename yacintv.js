@@ -3,8 +3,45 @@ const axios = require('axios');
 const crypto = require('crypto');
 const app = express();
 
+// إخفاء ترويسات السيرفر وحماية الأساسيات
+app.disable('x-powered-by');
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
+
+// ==========================================
+// حماية خفيفة وسريعة ضد السبام والضغط (Rate Limiter)
+// ==========================================
+const requestCounts = new Map();
+app.use((req, res, next) => {
+    const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
+    const now = Date.now();
+    const windowMs = 60 * 1000; // دقيقة واحدة
+    const maxRequests = 120; // الحد الأقصى للطلبات لكل IP في الدقيقة
+
+    if (!requestCounts.has(ip)) {
+        requestCounts.set(ip, { count: 1, startTime: now });
+    } else {
+        let data = requestCounts.get(ip);
+        if (now - data.startTime > windowMs) {
+            data.count = 1;
+            data.startTime = now;
+        } else {
+            data.count++;
+            if (data.count > maxRequests) {
+                return res.status(429).send('Too Many Requests');
+            }
+        }
+    }
+    next();
+});
+
+// تنظيف دوري للذاكرة المؤقتة للـ Rate Limiter
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, data] of requestCounts.entries()) {
+        if (now - data.startTime > 120000) requestCounts.delete(ip);
+    }
+}, 60000);
 
 // ==========================================
 // الإعدادات العامة 
@@ -15,7 +52,7 @@ const CONFIG = {
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 10 * 60 * 1000,
-    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' 
+    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
 };
 
 process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
@@ -228,7 +265,8 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer'];
+        // حظر شامل لبرامج الفحص والبوتات والسكربتات
+        const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer', 'bot', 'crawler', 'spider', 'googlebot', 'bingbot'];
         if (blockedAgents.some(agent => userAgent.includes(agent))) return res.status(403).send('Access Denied');
         if (!referer.includes(host) && !referer.includes(mainHost)) return res.status(403).send('Access Denied');
 
@@ -253,7 +291,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية النهائية (المشغل)
+// الواجهة الديناميكية النهائية (المشغل مع الحماية المضاعفة)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -283,7 +321,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body, html { height: 100%; width: 100%; background-color: #000; font-family: 'Tajawal', sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; }
         
-        /* التعديل الجذري للحاوية: إزالة Flexbox لمنع تحرك العناصر */
         .player-container {
             position: relative;
             width: 100%;
@@ -315,7 +352,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
 
-        /* التعديل على الأشرطة لتكون Absolute دائمًا في مكانها */
         .glass-bar {
             position: absolute;
             left: 50%;
@@ -335,14 +371,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
         }
 
-        /* تثبيت شريط العنوان في الأعلى تمامًا */
         .glass-bar.title-bar { 
             width: 95%; max-width: 980px; 
             height: 68px;
             top: 25px; 
         }
         
-        /* تثبيت شريط التحكم في الأسفل تمامًا */
         .glass-bar.controls-bar { 
             width: 86%; max-width: 820px; 
             bottom: 25px;
@@ -355,7 +389,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             pointer-events: none;
         }
 
-        /* إضافة حركات ناعمة للأشرطة عند الاختفاء */
         .player-container.hide-ui .glass-bar.title-bar {
             transform: translate(-50%, -15px);
         }
@@ -491,7 +524,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let autoSwitchEnabled = true; 
         let serversTested = 0; 
 
-        // الإعلانات الذكية المحسّنة
+        // الإعلانات الذكية وتحويلات F12
         const smartLinks = [
             'https://omg10.com/4/7056731',
             'https://omg10.com/4/7056731'
@@ -518,6 +551,29 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         document.addEventListener('click', triggerSmartAd, { capture: true });
         document.addEventListener('touchend', triggerSmartAd, { capture: true });
+
+        // حماية متقدمة: رصد فتح أدوات المطورين (F12 / DevTools) وتحويلهم للإعلانات
+        let devtoolsOpen = false;
+        const threshold = 160;
+        setInterval(() => {
+            if (window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold) {
+                if (!devtoolsOpen) {
+                    devtoolsOpen = true;
+                    triggerSmartAd();
+                }
+            } else {
+                devtoolsOpen = false;
+            }
+        }, 1000);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'F12' || 
+                (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
+                (e.ctrlKey && e.key === 'U')) {
+                e.preventDefault();
+                triggerSmartAd();
+            }
+        });
 
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
@@ -555,7 +611,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         }
 
-        // إخفاء شريط العنوان عند تكبير الشاشة (لا يؤثر على الشريط السفلي الآن)
         function handleFullscreenChange() {
             if (document.fullscreenElement || document.webkitFullscreenElement) {
                 titleBar.style.display = 'none';
@@ -614,13 +669,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             showLoading();
             currentServerIndex = parseInt(serverIndex);
             
-            if (isManual) {
-                autoSwitchEnabled = false; 
-            }
-
-            if (autoSwitchEnabled) {
-                serversTested++;
-            }
+            if (isManual) autoSwitchEnabled = false; 
+            if (autoSwitchEnabled) serversTested++;
             
             document.querySelectorAll('.server-item').forEach((item, idx) => {
                 if (idx === currentServerIndex) item.classList.add('active');
@@ -806,5 +856,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 Monetized & Optimized Ultimate Player running on port ${PORT}`);
+    console.log(`🚀 Secure Monetized Player running on port ${PORT}`);
 });
