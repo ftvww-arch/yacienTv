@@ -253,13 +253,12 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية النهائية
+// الواجهة الديناميكية النهائية (المشغل)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
     const embedUrl = `${hostUrl}/play/${channelHash}`;
 
-    // إضافة isManual = true للمنادات اليدوية لمنع التنقل التلقائي بعدها
     const serverItemsHtml = servers.map((srv, idx) => `
         <div class="server-item ${idx === 0 ? 'active' : ''}" onclick="changeServer(${idx}, true)">
             <div class="server-info">
@@ -284,6 +283,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body, html { height: 100%; width: 100%; background-color: #000; font-family: 'Tajawal', sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; }
         
+        /* التعديل الجذري للحاوية: إزالة Flexbox لمنع تحرك العناصر */
         .player-container {
             position: relative;
             width: 100%;
@@ -291,11 +291,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             max-width: 1200px;
             max-height: 800px;
             background-color: #000;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            align-items: center;
-            padding: 25px 0;
+            overflow: hidden;
             cursor: default;
             user-select: none;
             -webkit-user-select: none;
@@ -319,16 +315,11 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
 
-        /* تعديلات شريط Title Bar */
-        .glass-bar.title-bar { 
-            width: 95%; max-width: 980px; 
-            height: 68px; /* شريط أطول وأجمل */
-            margin-top: -10px; /* رفعه للأعلى قليلاً */
-        }
-        .glass-bar.controls-bar { width: 86%; max-width: 820px; }
-
+        /* التعديل على الأشرطة لتكون Absolute دائمًا في مكانها */
         .glass-bar {
-            position: relative;
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
             z-index: 10;
             height: 58px;
             background: rgba(20, 22, 32, 0.78);
@@ -344,13 +335,36 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
         }
 
-        .player-container.hide-ui .glass-bar,
-        .player-container.hide-ui .server-popup { opacity: 0; pointer-events: none; transform: translateY(10px); }
+        /* تثبيت شريط العنوان في الأعلى تمامًا */
+        .glass-bar.title-bar { 
+            width: 95%; max-width: 980px; 
+            height: 68px;
+            top: 25px; 
+        }
+        
+        /* تثبيت شريط التحكم في الأسفل تمامًا */
+        .glass-bar.controls-bar { 
+            width: 86%; max-width: 820px; 
+            bottom: 25px;
+        }
+
         .player-container.hide-ui { cursor: none; }
+        
+        .player-container.hide-ui .glass-bar {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* إضافة حركات ناعمة للأشرطة عند الاختفاء */
+        .player-container.hide-ui .glass-bar.title-bar {
+            transform: translate(-50%, -15px);
+        }
+        .player-container.hide-ui .glass-bar.controls-bar {
+            transform: translate(-50%, 15px);
+        }
 
         .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; transition: opacity 0.2s; letter-spacing: 0.5px; }
         .logo-text:hover { opacity: 0.8; }
-        
         .video-title { color: #e5e7eb; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; text-align: right; }
 
         .left-controls { display: flex; align-items: center; gap: 8px; width: 100px; }
@@ -398,8 +412,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         #copyEmbedBtn:hover { background-color: #4a3be0; }
 
         @media (max-width: 768px) {
-            .glass-bar.title-bar { width: 96%; padding: 0 16px; margin-top: 0; }
-            .glass-bar.controls-bar { width: 92%; padding: 0 16px; }
+            .glass-bar.title-bar { width: 96%; padding: 0 16px; top: 15px; }
+            .glass-bar.controls-bar { width: 92%; padding: 0 16px; bottom: 15px; }
             .video-title { font-size: 13px; max-width: 50%; }
         }
     </style>
@@ -474,12 +488,10 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         
         let currentServerIndex = 0;
         let isPlaying = true;
-        let autoSwitchEnabled = true; // متغير لتعطيل الفحص التلقائي بمجرد نجاح أو التدخل اليدوي
-        let serversTested = 0; // تتبع عدد السيرفرات التي تم فحصها
+        let autoSwitchEnabled = true; 
+        let serversTested = 0; 
 
-        // =====================================
-        // نظام الإعلانات الذكية المحسّن
-        // =====================================
+        // الإعلانات الذكية المحسّنة
         const smartLinks = [
             'https://omg10.com/4/7056731',
             'https://omg10.com/4/7056731'
@@ -498,21 +510,15 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 anchor.click();
                 document.body.removeChild(anchor);
                 
-                // السماح بفتح الإعلان مرة أخرى بعد 10 دقائق
                 setTimeout(() => {
                     adOpened = false;
                 }, 10 * 60 * 1000); 
             }
         }
 
-        // تفعيل الإعلان عند النقر أو اللمس في أي مكان في الصفحة
         document.addEventListener('click', triggerSmartAd, { capture: true });
         document.addEventListener('touchend', triggerSmartAd, { capture: true });
 
-
-        // =====================================
-        // عناصر واجهة المستخدم والتشغيل
-        // =====================================
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
         const playIcon = document.getElementById('playIcon');
@@ -549,7 +555,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         }
 
-        // إخفاء الـ Title Bar عند تشغيل وضع كامل الشاشة
+        // إخفاء شريط العنوان عند تكبير الشاشة (لا يؤثر على الشريط السفلي الآن)
         function handleFullscreenChange() {
             if (document.fullscreenElement || document.webkitFullscreenElement) {
                 titleBar.style.display = 'none';
@@ -560,7 +566,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 
-        // إيماءات التفاعل واللمس
         let clickCount = 0;
         let clickTimer = null;
         playerContainer.addEventListener('click', (e) => {
@@ -605,15 +610,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             loadingOverlay.style.pointerEvents = 'none';
         }
 
-        // =====================================
-        // منطق فحص وتشغيل السيرفرات الذكي
-        // =====================================
         function changeServer(serverIndex, isManual = false) {
             showLoading();
             currentServerIndex = parseInt(serverIndex);
             
             if (isManual) {
-                autoSwitchEnabled = false; // التبديل اليدوي يوقف الفحص التلقائي
+                autoSwitchEnabled = false; 
             }
 
             if (autoSwitchEnabled) {
@@ -638,7 +640,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                         hideLoading();
                         isPlaying = true;
                         updatePlayPauseUI();
-                        autoSwitchEnabled = false; // نجح التشغيل، أوقف الفحص التلقائي!
+                        autoSwitchEnabled = false; 
                     }).catch(() => { hideLoading(); });
                 });
 
@@ -647,12 +649,11 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
                             case Hls.ErrorTypes.MEDIA_ERROR:
-                                // فحص تلقائي لمرة واحدة فقط لجميع السيرفرات المتاحة
                                 if (autoSwitchEnabled && serversTested < totalServers) {
                                     let nextServer = (currentServerIndex + 1) % totalServers;
                                     changeServer(nextServer, false); 
                                 } else {
-                                    autoSwitchEnabled = false; // فشل نهائي للتبديل، التحول للوضع اليدوي
+                                    autoSwitchEnabled = false; 
                                     hls.destroy();
                                     hideLoading();
                                 }
@@ -679,7 +680,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             serverPopup.style.display = 'none';
         }
 
-        // بدء الفحص الأول عند تحميل الصفحة
         changeServer(0, false);
 
         playPauseBtn.addEventListener('click', (e) => {
@@ -774,7 +774,6 @@ function generateOfflineUI(reasonMsg) {
     </div>
     
     <script>
-        // الإعلان الذكي المربوط بأي نقرة على الصفحة
         const smartLinks = [
             'https://omg10.com/4/7056731',
             'https://omg10.com/4/7056731'
@@ -793,7 +792,6 @@ function generateOfflineUI(reasonMsg) {
                 anchor.click();
                 document.body.removeChild(anchor);
                 
-                // إعادة فتح الإعلان بعد 10 دقائق
                 setTimeout(() => { adOpened = false; }, 10 * 60 * 1000);
             }
         }
@@ -801,7 +799,6 @@ function generateOfflineUI(reasonMsg) {
         document.addEventListener('click', triggerSmartAd, { capture: true });
         document.addEventListener('touchend', triggerSmartAd, { capture: true });
         
-        // إعادة تحميل الصفحة كل دقيقة (60 ثانية) للتحقق التلقائي إذا بدأ البث
         setTimeout(() => { location.reload(); }, 60 * 1000);
     </script>
 </body>
