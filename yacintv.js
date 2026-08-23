@@ -122,27 +122,23 @@ function generateStreamId(str) {
     return Math.abs(hash);
 }
 
+
 // ==========================================
 // 4. مسارات Xtream Codes API (التي يقرأها Ibo Player)
 // ==========================================
-
-// مسار الـ API الرئيسي
 app.get('/player_api.php', async (req, res) => {
     const { username, password, action } = req.query;
-
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    // 1. تسجيل الدخول (يقبل أي شيء لأنه مجاني)
+    // 1. تسجيل الدخول
     if (!action) {
         return res.json({
             user_info: {
                 username: username || "free",
                 password: password || "free",
-                auth: 1, // 1 تعني الدخول ناجح
+                auth: 1, 
                 status: "Active",
-                exp_date: "1999999999", // تاريخ انتهاء بعيد جداً
-                is_trial: "0",
-                active_cons: "1",
+                exp_date: "1999999999", 
                 max_connections: "99"
             },
             server_info: {
@@ -155,30 +151,26 @@ app.get('/player_api.php', async (req, res) => {
         });
     }
 
-    // 2. إرسال أقسام القنوات (Categories)
+    // 2. إرسال أقسام البث المباشر
     if (action === 'get_live_categories') {
-        return res.json([
-            { category_id: "1", category_name: "⚽ مباريات اليوم والمباشر", parent_id: 0 }
-        ]);
+        return res.json([{ category_id: "1", category_name: "⚽ مباريات اليوم والمباشر", parent_id: 0 }]);
     }
 
-    // 3. إرسال القائمة الكاملة للمباريات والقنوات
+    // 3. إرسال قنوات البث المباشر
     if (action === 'get_live_streams') {
         try {
             const matches = await CacheEngine.getOrFetch('matches_list', async () => {
-                const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
+                const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 8000 }); // رفعنا وقت الانتظار لـ 8 ثواني لتفادي بطء المصدر
                 return response.data;
             }, 60000);
 
             const streams = [];
-
             matches.forEach(match => {
                 let channelStr = match.channel || match.id_live || '';
                 let cleanChannel = channelStr.startsWith('live_tv_') ? channelStr.replace('live_tv_', '') : channelStr;
                 
                 if (!cleanChannel) return;
 
-                // إنشاء ID رقمي وحفظه بالخريطة للرجوع إليه عند التشغيل
                 const streamId = generateStreamId(cleanChannel);
                 streamMap.set(streamId, cleanChannel);
 
@@ -202,9 +194,18 @@ app.get('/player_api.php', async (req, res) => {
 
             return res.json(streams);
         } catch (error) {
-            return res.json([]); // إرسال قائمة فارغة عند الخطأ كي لا يتعطل التطبيق
+            console.error("Error fetching streams:", error.message);
+            return res.json([]); 
         }
     }
+
+    // 4. (الحل السحري) الرد على التطبيق بخصوص الأفلام والمسلسلات حتى لا يعطي خطأ
+    if (action === 'get_vod_categories' || action === 'get_series_categories' || action === 'get_vod_streams' || action === 'get_series') {
+        return res.json([]); // إرسال قائمة فارغة تخبر التطبيق أنه لا يوجد أفلام
+    }
+
+    // الرد الافتراضي لأي طلب غير معروف
+    return res.json([]);
 });
 
 // ==========================================
