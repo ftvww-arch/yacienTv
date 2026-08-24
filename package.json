@@ -7,14 +7,12 @@
     "start": "node yacintv.js"
   },
   "dependencies": {
-    "axios": "latest",
-    "cheerio": "latest",
-    "compression": "latest",
-    "cors": "latest",
-    "express": "latest",
-    "hls.js": "latest"
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=14.0.0"
   }
 }
