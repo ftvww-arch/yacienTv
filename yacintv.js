@@ -350,7 +350,15 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const realChannel = decodeId(hash);
         const cacheKey = `manifest_${realChannel}_${serverIndex}`;
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[parseInt(serverIndex)];
+        let serverInfo = servers[parseInt(serverIndex)];
+
+        // تحويل الرابط تلقائياً من index.m3u8 إلى ملف القطع المباشر (mono.m3u8)
+        if (typeof serverInfo === 'string' && serverInfo.includes('index.m3u8')) {
+            serverInfo = serverInfo.replace('index.m3u8', 'tracks-v1a1/mono.m3u8');
+        } else if (serverInfo && serverInfo.url && serverInfo.url.includes('index.m3u8')) {
+            serverInfo = { ...serverInfo, url: serverInfo.url.replace('index.m3u8', 'tracks-v1a1/mono.m3u8') };
+        }
+
         const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo), CONFIG.MANIFEST_CACHE);
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -361,7 +369,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         res.status(500).send('Manifest Error');
     }
 });
-
 
 
 
