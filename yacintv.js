@@ -127,7 +127,7 @@ async function validateStream(url, headers) {
 }
 
 // ==========================================
-// محاكاة جلب قنوات BeIN (بديل الـ Workflow القديم)
+// استخراج روابط BeIN الحقيقية (.m3u8) عبر Axios و Cheerio
 // ==========================================
 async function scrapeBeinChannel(channelId) {
     const BASE_URL = 'https://dlstreams.st';
@@ -136,49 +136,74 @@ async function scrapeBeinChannel(channelId) {
     try {
         const { data: html } = await axios.get(`${BASE_URL}/watch.php?id=${channelId}`, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                 'Referer': BASE_URL
             },
             timeout: 10000
         });
 
-        const m3u8Regex = /(https?:\/\/[^\s"'`]+\.m3u8[^\s"'`]*)/g;
-        const matches = html.match(m3u8Regex);
+        const $ = cheerio.load(html);
+        
+        let scriptTexts = '';
+        $('script').each((i, el) => {
+            scriptTexts += $(el).html() + '\n';
+        });
 
-        if (matches && matches.length > 0) {
-            const uniqueUrls = [...new Set(matches)];
-            for (let i = 0; i < uniqueUrls.length; i++) {
-                const srvUrl = uniqueUrls[i];
+        // البحث الدقيق عن أي روابط m3u8 داخل السكربتات أو الكود المصدري
+        const m3u8Regex = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/g;
+        let match;
+        const foundUrls = new Set();
+
+        while ((match = m3u8Regex.exec(scriptTexts + html)) !== null) {
+            foundUrls.add(match[1]);
+        }
+
+        if (foundUrls.size > 0) {
+            let idx = 1;
+            for (let url of foundUrls) {
                 const srvHeaders = {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Referer': BASE_URL
                 };
                 
-                // فحص ما إذا كان السيرفر حقيقياً ويعمل
-                const isValid = await validateStream(srvUrl, srvHeaders);
-                if (isValid) {
+                servers.push({
+                    name: `سيرفر مباشر ${idx++}`,
+                    url: url,
+                    headers: srvHeaders,
+                    swap: null
+                });
+            }
+        }
+
+        // إذا لم يتم العثور على روابط m3u8 مباشرة، نبحث عن أزرار المشغلات أو الـ iframes
+        if (servers.length === 0) {
+            $('.player-btn, iframe, .server-btn').each((i, el) => {
+                let dataSrc = $(el).attr('data-src') || $(el).attr('src') || $(el).attr('data-url');
+                if (dataSrc) {
+                    if (!dataSrc.startsWith('http')) dataSrc = BASE_URL + '/' + dataSrc;
                     servers.push({
-                        name: `سيرفر ${servers.length + 1} (Live)`,
-                        url: srvUrl,
-                        headers: srvHeaders,
+                        name: `سيرفر أزرار ${i + 1}`,
+                        url: dataSrc,
+                        headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': BASE_URL },
                         swap: null
                     });
                 }
-            }
+            });
         }
+
     } catch (err) {
         console.error(`خطأ في جلب قناة Bein ${channelId}:`, err.message);
     }
 
     if (servers.length === 0) {
-        // سيرفر احتياطي افتراضي في حال لم يعثر على روابط مباشرة
         servers.push({
-            name: `سيرفر احتياطي`,
-            url: `${BASE_URL}/watch.php?id=${channelId}`,
-            headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': BASE_URL },
+            name: "لم يتم العثور على رابط مباشر",
+            url: "",
+            headers: {},
             swap: null
         });
     }
+
     return servers;
 }
 
@@ -195,11 +220,10 @@ async function backgroundRefreshBeinChannels() {
         } catch (e) {
             console.log(`⚠️ فشل تحديث قناة beIN ${id}`);
         }
-        await new Promise(r => setTimeout(r, 2000)); // مهلة قصيرة بين كل قناة وأخرى
+        await new Promise(r => setTimeout(r, 2000));
     }
 }
 
-// تشغيل التحديث فوراً عند الإقلاع ثم جدولته كل 15 دقيقة
 setTimeout(backgroundRefreshBeinChannels, 5000);
 setInterval(backgroundRefreshBeinChannels, 15 * 60 * 1000);
 
@@ -279,15 +303,14 @@ async function fetchManifest(serverInfo) {
     return m3u8;
 }
 
-
-
 // ==========================================
+// مسارات التطبيق (Routes)
+// ==========================================
+app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
+
 // مسار معاينة البيانات المستخرجة (Debug)
-// ==========================================
 app.get('/debug/streams', (req, res) => {
     const debugData = {};
-    
-    // المرور على القنوات من 91 إلى 99 وفحص ما يوجد في الذاكرة
     for (let id = 91; id <= 99; id++) {
         const cached = CacheEngine.memory.get(`bein_servers_${id}`);
         debugData[`beIN Sports ${id - 90} Arabic (ID: ${id})`] = cached ? {
@@ -295,20 +318,12 @@ app.get('/debug/streams', (req, res) => {
             serversCount: cached.data.length,
             servers: cached.data
         } : {
-            status: "Not fetched yet or expired"
+            status: "Not fetched yet"
         };
     }
-    
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.send(JSON.stringify(debugData, null, 2));
 });
-
-
-
-// ==========================================
-// مسارات التطبيق (Routes)
-// ==========================================
-app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
 app.get('/api/refresh-token', (req, res) => {
     const userIp = getClientIp(req);
@@ -326,8 +341,6 @@ app.get('/bein/:id', async (req, res) => {
         }
 
         const matchTitle = `beIN Sports ${channelId - 90} Arabic`;
-        
-        // جلب السيرفرات المحدثة مسبقاً من الذاكرة أو فحصها فوراً إن لم تتوفر
         let cached = CacheEngine.memory.get(`bein_servers_${channelId}`);
         let servers = cached ? cached.data : await scrapeBeinChannel(channelId);
 
@@ -400,9 +413,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 // الواجهة البسيطة للمشغل
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
-    const totalServers = servers.length;
-    let embedUrl = channelHash.startsWith('bein_') ? `${hostUrl}/bein/${channelHash.replace('bein_', '')}` : `${hostUrl}/play/${channelHash}`;
-
     const serverItemsHtml = servers.map((srv, idx) => `
         <div class="server-item ${idx === 0 ? 'active' : ''}" onclick="changeServer(${idx})">
             <span>${srv.name}</span>
