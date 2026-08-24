@@ -279,6 +279,32 @@ async function fetchManifest(serverInfo) {
     return m3u8;
 }
 
+
+
+// ==========================================
+// مسار معاينة البيانات المستخرجة (Debug)
+// ==========================================
+app.get('/debug/streams', (req, res) => {
+    const debugData = {};
+    
+    // المرور على القنوات من 91 إلى 99 وفحص ما يوجد في الذاكرة
+    for (let id = 91; id <= 99; id++) {
+        const cached = CacheEngine.memory.get(`bein_servers_${id}`);
+        debugData[`beIN Sports ${id - 90} Arabic (ID: ${id})`] = cached ? {
+            status: "Available",
+            serversCount: cached.data.length,
+            servers: cached.data
+        } : {
+            status: "Not fetched yet or expired"
+        };
+    }
+    
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.send(JSON.stringify(debugData, null, 2));
+});
+
+
+
 // ==========================================
 // مسارات التطبيق (Routes)
 // ==========================================
