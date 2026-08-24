@@ -1,8 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer');
 const app = express();
 
 // إخفاء ترويسات السيرفر وحماية الأساسيات
@@ -53,7 +52,7 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
-    TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
+    TOKEN_EXPIRY: 10 * 60 * 1000, 
     MAIN_WEBSITE: 'https://www.kirozozo.xyz/' 
 };
 
@@ -129,23 +128,26 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// دالة استخراج قنوات BeIN المباشرة عبر Puppeteer (الجديدة)
+// دالة استخراج قنوات BeIN المباشرة عبر Puppeteer
 // ==========================================
 async function scrapeBeinChannel(channelId) {
     const BASE_URL = 'https://dlstreams.st';
     const servers = [];
     
-    // تشغيل المتصفح باستخدام الحزمة الخفيفة المخصصة لسيرفرات Render
+    // تشغيل المتصفح بإعدادات خفيفة ومستقرة على Render
     const browser = await puppeteer.launch({ 
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
-        ignoreHTTPSErrors: true,
+        headless: true,
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--single-process',
+            '--no-zygote'
+        ] 
     });
     
     const page = await browser.newPage();
-    // (باقي الكود يبقى كما هو دون تغيير)...
     
     try {
         await page.goto(`${BASE_URL}/watch.php?id=${channelId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -153,7 +155,6 @@ async function scrapeBeinChannel(channelId) {
         const buttonsCount = await page.evaluate(() => document.querySelectorAll('.player-btn').length);
         if (buttonsCount === 0) throw new Error('لم يتم العثور على أزرار مشغلات');
 
-        // فحص أول 3 سيرفرات فقط لتسريع العملية
         const maxServersToCheck = Math.min(buttonsCount, 3); 
 
         for (let i = 0; i < maxServersToCheck; i++) {
@@ -169,7 +170,7 @@ async function scrapeBeinChannel(channelId) {
                 setTimeout(() => {
                     page.off('request', requestHandler);
                     resolve(null);
-                }, 8000); // مهلة 8 ثوانٍ
+                }, 8000);
             });
 
             try {
@@ -201,7 +202,7 @@ async function scrapeBeinChannel(channelId) {
 }
 
 // ==========================================
-// جلب معلومات المباراة وعنوانها (للقنوات الأخرى)
+// جلب معلومات المباراة وعنوانها
 // ==========================================
 async function getMatchInfo(realChannelName) {
     try {
@@ -232,7 +233,7 @@ async function getMatchInfo(realChannelName) {
 }
 
 // ==========================================
-// جلب السيرفرات والمانيفست (للقنوات الأخرى)
+// جلب السيرفرات والمانيفست
 // ==========================================
 async function fetchChannelServers(realChannelName) {
     const channelId = `live_tv_${realChannelName}`;
@@ -312,7 +313,6 @@ app.get('/api/matches', async (req, res) => {
 
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
-// مسار تجديد التوكن في الخلفية دون قطع البث أو إعادة التحميل
 app.get('/api/refresh-token', (req, res) => {
     const userIp = getClientIp(req);
     const newToken = generateSecureToken(userIp);
@@ -321,20 +321,15 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
-// المسار الجديد الخاص بـ BeIN (يستخرج عبر Puppeteer ويحفظ في الكاش)
 app.get('/bein/:id', async (req, res) => {
     try {
         const channelId = parseInt(req.params.id);
-        
-        // التحقق من أن رقم القناة صالح (من 91 إلى 99)
         if (isNaN(channelId) || channelId < 91 || channelId > 99) {
             return res.send(generateOfflineUI('رقم القناة غير صالح. يجب أن يكون بين 91 و 99'));
         }
 
         const matchTitle = `beIN Sports ${channelId - 90} Arabic`;
         const cacheKey = `bein_servers_${channelId}`;
-        
-        // كاش لمدة 15 دقيقة لتخفيف الضغط عن Puppeteer
         const cacheDuration = 15 * 60 * 1000; 
         const servers = await CacheEngine.getOrFetch(cacheKey, () => scrapeBeinChannel(channelId), cacheDuration);
 
@@ -349,7 +344,6 @@ app.get('/bein/:id', async (req, res) => {
     }
 });
 
-// المسار القديم لباقي القنوات (الـ API)
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -388,7 +382,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const { hash, serverIndex } = req.params;
         let servers, serverInfo, cacheKey;
 
-        // دمج بين منطق قنوات BeIN ومنطق القنوات الأخرى
         if (hash.startsWith('bein_')) {
             const channelId = parseInt(hash.replace('bein_', ''));
             const cachedData = CacheEngine.memory.get(`bein_servers_${channelId}`);
@@ -417,7 +410,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية النهائية (المشغل مع التجديد الذاتي للتوكن)
+// الواجهة الديناميكية النهائية (المشغل)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -452,135 +445,62 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body, html { height: 100%; width: 100%; background-color: #000; font-family: 'Tajawal', sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; }
-        
-        .player-container {
-            position: relative;
-            width: 100%;
-            height: 100%;
-            max-width: 1200px;
-            max-height: 800px;
-            background-color: #000;
-            overflow: hidden;
-            cursor: default;
-            user-select: none;
-            -webkit-user-select: none;
-        }
-
-        .loading-overlay {
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.85);
-            backdrop-filter: blur(10px);
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            z-index: 25;
-            transition: opacity 0.4s ease;
-        }
+        .player-container { position: relative; width: 100%; height: 100%; max-width: 1200px; max-height: 800px; background-color: #000; overflow: hidden; user-select: none; -webkit-user-select: none; }
+        .loading-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 25; transition: opacity 0.4s ease; }
         .spinner { width: 50px; height: 50px; border: 4px solid rgba(255, 255, 255, 0.1); border-top: 4px solid #5c4dff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
-        .loading-text { color: #fff; font-size: 15px; font-weight: 500; letter-spacing: 0.5px; }
+        .loading-text { color: #fff; font-size: 15px; font-weight: 500; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
-
-        .glass-bar {
-            position: absolute;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 10;
-            height: 58px;
-            background: rgba(20, 22, 32, 0.78);
-            backdrop-filter: blur(14px);
-            -webkit-backdrop-filter: blur(14px);
-            border-radius: 14px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 24px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
-        }
-
+        .glass-bar { position: absolute; left: 50%; transform: translateX(-50%); z-index: 10; height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-radius: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); transition: opacity 0.4s ease, transform 0.4s ease; }
         .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
         .glass-bar.controls-bar { width: 86%; max-width: 820px; bottom: 25px; }
-
         .player-container.hide-ui { cursor: none; }
         .player-container.hide-ui .glass-bar { opacity: 0; pointer-events: none; }
-        .player-container.hide-ui .glass-bar.title-bar { transform: translate(-50%, -15px); }
-        .player-container.hide-ui .glass-bar.controls-bar { transform: translate(-50%, 15px); }
-
-        .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; transition: opacity 0.2s; letter-spacing: 0.5px; }
-        .logo-text:hover { opacity: 0.8; }
+        .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; }
         .video-title { color: #e5e7eb; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; text-align: right; }
-
         .left-controls { display: flex; align-items: center; gap: 8px; width: 100px; }
         .live-dot { width: 8px; height: 8px; background-color: #ff3b30; border-radius: 50%; box-shadow: 0 0 8px rgba(255, 59, 48, 0.8); }
-        .live-text { color: #ffffff; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
-
+        .live-text { color: #ffffff; font-size: 13px; font-weight: 700; text-transform: uppercase; }
         .center-controls { position: absolute; left: 50%; transform: translateX(-50%); display: flex; justify-content: center; align-items: center; }
-        .play-pause-btn { width: 44px; height: 44px; background-color: #5c4dff; border: none; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; transition: transform 0.2s ease, background-color 0.2s; box-shadow: 0 4px 12px rgba(92, 77, 255, 0.4); }
-        .play-pause-btn:hover { transform: scale(1.1); background-color: #4a3be0; }
+        .play-pause-btn { width: 44px; height: 44px; background-color: #5c4dff; border: none; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; box-shadow: 0 4px 12px rgba(92, 77, 255, 0.4); }
         .play-pause-icon { fill: #ffffff; width: 18px; height: 18px; }
-
         .right-controls { display: flex; align-items: center; gap: 18px; width: 130px; justify-content: flex-end; }
-        .control-icon-btn { background: none; border: none; cursor: pointer; display: flex; justify-content: center; align-items: center; opacity: 0.8; transition: opacity 0.2s, transform 0.2s; }
-        .control-icon-btn:hover { opacity: 1; transform: scale(1.1); }
+        .control-icon-btn { background: none; border: none; cursor: pointer; display: flex; justify-content: center; align-items: center; opacity: 0.8; }
         .icon-svg { fill: #d1d5db; width: 20px; height: 20px; }
-
         .server-popup { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 340px; background: rgba(20, 22, 35, 0.96); backdrop-filter: blur(16px); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.12); color: white; z-index: 100; padding: 20px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8); }
         .popup-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 10px; }
-        .popup-title { display: flex; flex-direction: column; }
-        .popup-title .en { font-size: 11px; color: #9ca3af; text-transform: uppercase; font-weight: 500; }
+        .popup-title .en { font-size: 11px; color: #9ca3af; text-transform: uppercase; }
         .popup-title .ar { font-size: 14px; font-weight: 700; margin-top: 2px; }
         .close-server-popup { background: none; border: none; color: #9ca3af; font-size: 20px; cursor: pointer; }
-        .close-server-popup:hover { color: #ffffff; }
-
         .server-list { display: flex; flex-direction: column; gap: 6px; max-height: 250px; overflow-y: auto; }
-        .server-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 10px; cursor: pointer; transition: background-color 0.2s; }
-        .server-item:hover { background-color: rgba(255, 255, 255, 0.08); }
+        .server-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 10px; cursor: pointer; }
         .server-item.active { background-color: rgba(92, 77, 255, 0.3); border: 1px solid rgba(92, 77, 255, 0.4); }
         .server-info { display: flex; flex-direction: column; }
         .server-info .en { font-size: 13px; font-weight: 500; }
-        .server-info .ar { font-size: 12px; color: #9ca3af; margin-top: 2px; font-weight: 500; }
-        .server-item.active .server-info .en, .server-item.active .server-info .ar { color: #ffffff; }
+        .server-info .ar { font-size: 12px; color: #9ca3af; margin-top: 2px; }
         .check-icon { width: 18px; height: 18px; fill: #5c4dff; display: none; }
         .signal-icon { width: 16px; height: 16px; fill: #9ca3af; }
         .server-item.active .check-icon { display: block; }
         .server-item.active .signal-icon { display: none; }
-
         .modal { display: none; position: fixed; z-index: 150; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); justify-content: center; align-items: center; backdrop-filter: blur(8px); }
         .modal-content { background-color: rgba(25, 27, 40, 0.95); border-radius: 16px; padding: 24px; width: 90%; max-width: 500px; border: 1px solid rgba(255, 255, 255, 0.1); color: white; display: flex; flex-direction: column; gap: 16px; }
         .modal-header { display: flex; justify-content: space-between; align-items: center; }
-        .modal-header h2 { font-size: 18px; font-weight: 700; }
         .close-modal { background: none; border: none; color: #d1d5db; font-size: 22px; cursor: pointer; }
-        #embedCodeArea { background-color: rgba(0,0,0,0.4); border: 1px solid rgba(255, 255, 255, 0.1); color: #a78bfa; font-family: monospace; padding: 12px; border-radius: 8px; resize: none; width: 100%; height: 100px; font-size: 12px; }
-        #copyEmbedBtn { background-color: #5c4dff; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 14px; transition: background-color 0.2s; }
-        #copyEmbedBtn:hover { background-color: #4a3be0; }
-
-        @media (max-width: 768px) {
-            .glass-bar.title-bar { width: 96%; padding: 0 16px; top: 15px; }
-            .glass-bar.controls-bar { width: 92%; padding: 0 16px; bottom: 15px; }
-            .video-title { font-size: 13px; max-width: 50%; }
-        }
+        #embedCodeArea { background-color: rgba(0,0,0,0.4); border: 1px solid rgba(255, 255, 255, 0.1); color: #a78bfa; font-family: monospace; padding: 12px; border-radius: 8px; width: 100%; height: 100px; font-size: 12px; }
+        #copyEmbedBtn { background-color: #5c4dff; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: 700; }
     </style>
 </head>
 <body>
-
     <div class="player-container" id="playerContainer">
         <div id="loadingOverlay" class="loading-overlay">
             <div class="spinner"></div>
             <div class="loading-text">جاري التحقق من البث المباشر...</div>
         </div>
-
         <video id="video" playsinline webkit-playsinline autoplay></video>
-
         <div class="glass-bar title-bar" id="titleBar">
             <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">YTPlus.com</a>
             <div class="video-title" dir="rtl">${matchTitle}</div>
         </div>
-        
         <div id="serverPopup" class="server-popup">
             <div class="popup-header">
                 <div class="popup-title">
@@ -591,20 +511,17 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             </div>
             <div class="server-list">${serverItemsHtml}</div>
         </div>
-        
         <div class="glass-bar controls-bar" id="controlsBar">
             <div class="left-controls">
                 <div class="live-dot"></div>
                 <span class="live-text">LIVE</span>
             </div>
-
             <div class="center-controls">
                 <button class="play-pause-btn" id="playPauseBtn">
                     <svg class="play-pause-icon" id="pauseIcon" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>
                     <svg class="play-pause-icon" id="playIcon" style="display: none;" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>
                 </button>
             </div>
-
             <div class="right-controls">
                 <button class="control-icon-btn" id="embedBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M8.293 6.293a1 1 0 0 1 1.414 0L14.414 11H19a1 1 0 0 1 0 2h-4.586l-4.707 4.707a1 1 0 0 1-1.414-1.414L11.586 13H5a1 1 0 0 1 0-2h6.586L8.293 7.707a1 1 0 0 1 0-1.414z"/><path d="M19 19a1 1 0 1 1-2 0V5a1 1 0 0 1 2 0v14z"/></svg></button>
                 <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>
@@ -612,7 +529,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             </div>
         </div>
     </div>
-
     <div id="embedModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -623,24 +539,20 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             <button id="copyEmbedBtn">Copy Code / نسخ الكود</button>
         </div>
     </div>
-
     <script>
         const video = document.getElementById('video');
         const playerContainer = document.getElementById('playerContainer');
         const loadingOverlay = document.getElementById('loadingOverlay');
         const titleBar = document.getElementById('titleBar');
         let hls = null;
-        
         let currentToken = '${secureToken}';
         const channelHash = '${channelHash}';
         const totalServers = ${totalServers};
-        
         let currentServerIndex = 0;
         let isPlaying = true;
         let autoSwitchEnabled = true; 
         let serversTested = 0; 
 
-        // نظام التجديد التلقائي للتوكن في الخلفية كل 8 دقائق
         setInterval(async () => {
             try {
                 const response = await fetch('/api/refresh-token');
@@ -652,60 +564,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                         hls.loadSource(newManifestUrl);
                     }
                 }
-            } catch (e) {
-                console.error("فشل تجديد التوكن");
-            }
+            } catch (e) {}
         }, 8 * 60 * 1000);
-
-        // الإعلانات الذكية وتحويلات F12
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
-
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                
-                setTimeout(() => {
-                    adOpened = false;
-                }, 10 * 60 * 1000); 
-            }
-        }
-
-        document.addEventListener('click', triggerSmartAd, { capture: true });
-        document.addEventListener('touchend', triggerSmartAd, { capture: true });
-
-        let devtoolsOpen = false;
-        const threshold = 160;
-        setInterval(() => {
-            if (window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold) {
-                if (!devtoolsOpen) {
-                    devtoolsOpen = true;
-                    triggerSmartAd();
-                }
-            } else {
-                devtoolsOpen = false;
-            }
-        }, 1000);
-
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'F12' || 
-                (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
-                (e.ctrlKey && e.key === 'U')) {
-                e.preventDefault();
-                triggerSmartAd();
-            }
-        });
 
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
@@ -720,18 +580,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         const closeServerPopup = document.getElementById('closeServerPopup');
         const fullscreenBtn = document.getElementById('fullscreenBtn');
 
-        let inactivityTimeout;
-        function resetInactivityTimer() {
-            playerContainer.classList.remove('hide-ui');
-            clearTimeout(inactivityTimeout);
-            inactivityTimeout = setTimeout(() => {
-                if (!video.paused && serverPopup.style.display !== 'block') {
-                    playerContainer.classList.add('hide-ui');
-                }
-            }, 3000);
-        }
-        playerContainer.addEventListener('mousemove', resetInactivityTimer);
-
         function toggleFullscreen() {
             if (!document.fullscreenElement && !document.webkitFullscreenElement) {
                 if (playerContainer.requestFullscreen) playerContainer.requestFullscreen();
@@ -743,64 +591,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         }
 
-        function handleFullscreenChange() {
-            if (document.fullscreenElement || document.webkitFullscreenElement) {
-                titleBar.style.display = 'none';
-            } else {
-                titleBar.style.display = 'flex';
-            }
-        }
-        document.addEventListener('fullscreenchange', handleFullscreenChange);
-        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-
-        let clickCount = 0;
-        let clickTimer = null;
-        playerContainer.addEventListener('click', (e) => {
-            if (e.target.closest('.glass-bar') || e.target.closest('.server-popup') || e.target.closest('.modal')) return;
-            clickCount++;
-            if (clickCount === 1) {
-                clickTimer = setTimeout(() => {
-                    if (video.paused) video.play(); else video.pause();
-                    clickCount = 0;
-                }, 250);
-            } else if (clickCount === 2) {
-                clearTimeout(clickTimer);
-                toggleFullscreen();
-                clickCount = 0;
-            }
-        });
-
-        let lastTouchTime = 0;
-        playerContainer.addEventListener('touchend', (e) => {
-            if (e.target.closest('.glass-bar') || e.target.closest('.server-popup') || e.target.closest('.modal')) return;
-            const currentTime = new Date().getTime();
-            const tapLength = currentTime - lastTouchTime;
-            if (tapLength < 300 && tapLength > 0) {
-                e.preventDefault();
-                toggleFullscreen();
-                lastTouchTime = 0;
-            } else {
-                lastTouchTime = currentTime;
-                if (playerContainer.classList.contains('hide-ui')) {
-                    playerContainer.classList.remove('hide-ui');
-                    resetInactivityTimer();
-                }
-            }
-        });
-
-        function showLoading() {
-            loadingOverlay.style.opacity = '1';
-            loadingOverlay.style.pointerEvents = 'auto';
-        }
-        function hideLoading() {
-            loadingOverlay.style.opacity = '0';
-            loadingOverlay.style.pointerEvents = 'none';
-        }
+        function showLoading() { loadingOverlay.style.opacity = '1'; loadingOverlay.style.pointerEvents = 'auto'; }
+        function hideLoading() { loadingOverlay.style.opacity = '0'; loadingOverlay.style.pointerEvents = 'none'; }
 
         function changeServer(serverIndex, isManual = false) {
             showLoading();
             currentServerIndex = parseInt(serverIndex);
-            
             if (isManual) autoSwitchEnabled = false; 
             if (autoSwitchEnabled) serversTested++;
             
@@ -816,47 +612,22 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 hls = new Hls(); 
                 hls.loadSource(manifestUrl); 
                 hls.attachMedia(video);
-                
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play().then(() => {
-                        hideLoading();
-                        isPlaying = true;
-                        updatePlayPauseUI();
-                        autoSwitchEnabled = false; 
-                    }).catch(() => { hideLoading(); });
+                    video.play().then(() => { hideLoading(); isPlaying = true; updatePlayPauseUI(); autoSwitchEnabled = false; }).catch(() => { hideLoading(); });
                 });
-
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
-                        switch (data.type) {
-                            case Hls.ErrorTypes.NETWORK_ERROR:
-                                hls.startLoad();
-                                break;
-                            case Hls.ErrorTypes.MEDIA_ERROR:
-                                hls.recoverMediaError();
-                                break;
-                            default:
-                                if (autoSwitchEnabled && serversTested < totalServers) {
-                                    let nextServer = (currentServerIndex + 1) % totalServers;
-                                    changeServer(nextServer, false); 
-                                } else {
-                                    autoSwitchEnabled = false; 
-                                    hls.destroy();
-                                    hideLoading();
-                                }
-                                break;
+                        if (autoSwitchEnabled && serversTested < totalServers) {
+                            changeServer((currentServerIndex + 1) % totalServers, false); 
+                        } else {
+                            autoSwitchEnabled = false; hls.destroy(); hideLoading();
                         }
                     }
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = manifestUrl; 
                 video.addEventListener('loadedmetadata', () => {
-                    video.play().then(() => {
-                        hideLoading();
-                        isPlaying = true;
-                        updatePlayPauseUI();
-                        autoSwitchEnabled = false;
-                    }).catch(() => { hideLoading(); });
+                    video.play().then(() => { hideLoading(); isPlaying = true; updatePlayPauseUI(); autoSwitchEnabled = false; }).catch(() => { hideLoading(); });
                 });
             }
             serverPopup.style.display = 'none';
@@ -864,13 +635,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
         changeServer(0, false);
 
-        playPauseBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (video.paused) video.play(); else video.pause();
-        });
-
-        video.addEventListener('play', () => { isPlaying = true; updatePlayPauseUI(); resetInactivityTimer(); });
-        video.addEventListener('pause', () => { isPlaying = false; updatePlayPauseUI(); playerContainer.classList.remove('hide-ui'); clearTimeout(inactivityTimeout); });
+        playPauseBtn.addEventListener('click', (e) => { e.stopPropagation(); if (video.paused) video.play(); else video.pause(); });
+        video.addEventListener('play', () => { isPlaying = true; updatePlayPauseUI(); });
+        video.addEventListener('pause', () => { isPlaying = false; updatePlayPauseUI(); });
 
         function updatePlayPauseUI() {
             if (isPlaying) { pauseIcon.style.display = 'block'; playIcon.style.display = 'none'; } 
@@ -880,27 +647,14 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         fullscreenBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFullscreen(); });
         settingsBtn.addEventListener('click', (e) => { e.stopPropagation(); serverPopup.style.display = serverPopup.style.display === 'block' ? 'none' : 'block'; });
         closeServerPopup.addEventListener('click', () => { serverPopup.style.display = 'none'; });
-
         embedBtn.addEventListener('click', () => { embedModal.style.display = 'flex'; });
         closeEmbedModal.addEventListener('click', () => { embedModal.style.display = 'none'; });
-        copyEmbedBtn.addEventListener('click', () => {
-            embedCodeArea.select(); document.execCommand('copy'); alert('تم نسخ كود التضمين!'); embedModal.style.display = 'none';
-        });
-
-        window.addEventListener('click', (event) => {
-            if (event.target == embedModal) embedModal.style.display = 'none';
-            if (serverPopup.style.display === 'block' && !serverPopup.contains(event.target) && event.target !== settingsBtn && !settingsBtn.contains(event.target)) {
-                serverPopup.style.display = 'none';
-            }
-        });
+        copyEmbedBtn.addEventListener('click', () => { embedCodeArea.select(); document.execCommand('copy'); alert('تم نسخ كود التضمين!'); embedModal.style.display = 'none'; });
     </script>
 </body>
 </html>`;
 }
 
-// ==========================================
-// تصميم صفحة (البث غير متوفر حالياً) الاحترافي
-// ==========================================
 function generateOfflineUI(reasonMsg) {
     return `
 <!DOCTYPE html>
@@ -910,83 +664,24 @@ function generateOfflineUI(reasonMsg) {
     <title>البث غير متوفر</title>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
-        body { 
-            margin: 0; padding: 0; 
-            background: #000 url('https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1920&q=80') center/cover no-repeat; 
-            display: flex; justify-content: center; align-items: center; 
-            height: 100vh; font-family: 'Tajawal', sans-serif; 
-        }
-        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 12, 16, 0.88); z-index: 1; }
-        .container { 
-            position: relative; z-index: 2; text-align: center; 
-            background: rgba(20,22,35,0.7); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            padding: 50px 40px; border-radius: 20px; 
-            border: 1px solid rgba(255, 255, 255, 0.1); 
-            box-shadow: 0 30px 60px rgba(0,0,0,0.8); width: 90%; max-width: 500px; 
-        }
-        .icon-container { display: flex; justify-content: center; margin-bottom: 20px; }
-        .icon { width: 65px; height: 65px; fill: #5c4dff; animation: pulse 2s infinite ease-in-out; }
-        @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }
-        h2 { color: #fff; margin-bottom: 12px; font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }
+        body { margin: 0; padding: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Tajawal', sans-serif; }
+        .container { position: relative; z-index: 2; text-align: center; background: rgba(20,22,35,0.7); backdrop-filter: blur(20px); padding: 50px 40px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.1); width: 90%; max-width: 500px; color: #fff; }
+        h2 { margin-bottom: 12px; font-size: 26px; }
         .reason { color: #f59e0b; font-size: 18px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 6px 16px; border-radius: 8px; }
-        .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; font-weight: 500; }
-        .btn { 
-            display: inline-block; background: linear-gradient(135deg, #5c4dff, #4a3be0); 
-            color: #fff; padding: 14px 34px; text-decoration: none; font-size: 16px; 
-            font-weight: 700; border-radius: 50px; transition: all 0.3s ease; 
-            box-shadow: 0 4px 15px rgba(92, 77, 255, 0.4); 
-        }
-        .btn:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(92, 77, 255, 0.6); }
-        .refresh-text { margin-top: 20px; font-size: 13px; color: #6b7280; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 6px; }
-        .refresh-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; box-shadow: 0 0 8px rgba(16, 185, 129, 0.6); animation: blink 1.5s infinite; }
-        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; }
+        .btn { display: inline-block; background: #5c4dff; color: #fff; padding: 14px 34px; text-decoration: none; font-size: 16px; font-weight: 700; border-radius: 50px; }
     </style>
 </head>
 <body>
-    <div class="overlay"></div>
     <div class="container">
-        <div class="icon-container">
-            <svg class="icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
-        </div>
         <h2>عفواً، البث غير متاح حالياً</h2>
         <div class="reason">${reasonMsg}</div>
         <div class="message">لم تبدأ المباراة بعد، أو تم إيقاف البث مؤقتاً.<br>يرجى البقاء في هذه الصفحة، سيبدأ البث التلقائي فور بدء الحدث!</div>
         <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي</a>
-        <div class="refresh-text"><div class="refresh-dot"></div> سيتم تحديث الصفحة تلقائياً للتحقق من البث</div>
     </div>
-    
-    <script>
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
-
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                setTimeout(() => { adOpened = false; }, 10 * 60 * 1000); 
-            }
-        }
-        document.addEventListener('click', triggerSmartAd, { capture: true });
-        document.addEventListener('touchend', triggerSmartAd, { capture: true });
-
-        // إعادة تحميل الصفحة تلقائياً كل 40 ثانية إذا كان البث غير متوفر
-        setTimeout(function() {
-            window.location.reload();
-        }, 40000);
-    </script>
+    <script>setTimeout(() => { window.location.reload(); }, 40000);</script>
 </body>
 </html>`;
 }
 
-// بدء السيرفر
 app.listen(PORT, () => console.log(`Server running securely on port ${PORT}`));
