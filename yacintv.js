@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const puppeteer = require('puppeteer');
 const app = express();
 
-// إخفاء ترويسات السيرفر وحماية الأساسيات
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
@@ -16,8 +15,8 @@ const requestCounts = new Map();
 app.use((req, res, next) => {
     const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
     const now = Date.now();
-    const windowMs = 60 * 1000; // دقيقة واحدة
-    const maxRequests = 120; // الحد الأقصى للطلبات لكل IP في الدقيقة
+    const windowMs = 60 * 1000; 
+    const maxRequests = 120; 
 
     if (!requestCounts.has(ip)) {
         requestCounts.set(ip, { count: 1, startTime: now });
@@ -36,7 +35,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// تنظيف دوري للذاكرة المؤقتة للـ Rate Limiter
 setInterval(() => {
     const now = Date.now();
     for (const [ip, data] of requestCounts.entries()) {
@@ -134,9 +132,10 @@ async function scrapeBeinChannel(channelId) {
     const BASE_URL = 'https://dlstreams.st';
     const servers = [];
     
-    // تشغيل المتصفح بإعدادات خفيفة ومستقرة على Render
+    // تشغيل المتصفح مع دعم مسار النظام وتجنب أخطاء Render
     const browser = await puppeteer.launch({ 
         headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
@@ -454,8 +453,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         .glass-bar { position: absolute; left: 50%; transform: translateX(-50%); z-index: 10; height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-radius: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); transition: opacity 0.4s ease, transform 0.4s ease; }
         .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
         .glass-bar.controls-bar { width: 86%; max-width: 820px; bottom: 25px; }
-        .player-container.hide-ui { cursor: none; }
-        .player-container.hide-ui .glass-bar { opacity: 0; pointer-events: none; }
         .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; }
         .video-title { color: #e5e7eb; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; text-align: right; }
         .left-controls { display: flex; align-items: center; gap: 8px; width: 100px; }
