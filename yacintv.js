@@ -1,7 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const app = express();
 
 // إخفاء ترويسات السيرفر وحماية الأساسيات
