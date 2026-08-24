@@ -135,20 +135,17 @@ async function scrapeBeinChannel(channelId) {
     const BASE_URL = 'https://dlstreams.st';
     const servers = [];
     
-    // تشغيل المتصفح بإعدادات خفيفة جداً تناسب منصة Render
+    // تشغيل المتصفح باستخدام الحزمة الخفيفة المخصصة لسيرفرات Render
     const browser = await puppeteer.launch({ 
-        headless: true,
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox', 
-            '--disable-dev-shm-usage', // يمنع امتلاء الذاكرة المؤقتة
-            '--disable-gpu',           // تعطيل الجرافيكس لتخفيف العبء
-            '--single-process',        // مهم جداً: يقلل استهلاك الرامات للنصف
-            '--no-zygote'
-        ] 
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+        ignoreHTTPSErrors: true,
     });
     
     const page = await browser.newPage();
+    // (باقي الكود يبقى كما هو دون تغيير)...
     
     try {
         await page.goto(`${BASE_URL}/watch.php?id=${channelId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
