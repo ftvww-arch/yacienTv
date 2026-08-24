@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const puppeteer = require('puppeteer'); // تمت إضافة مكتبة Puppeteer
 const app = express();
 
 // إخفاء ترويسات السيرفر وحماية الأساسيات
@@ -52,7 +53,7 @@ const CONFIG = {
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
-    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
+    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' 
 };
 
 process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
@@ -127,7 +128,74 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات المباراة وعنوانها
+// دالة استخراج قنوات BeIN المباشرة عبر Puppeteer (الجديدة)
+// ==========================================
+async function scrapeBeinChannel(channelId) {
+    const BASE_URL = 'https://dlstreams.st';
+    const servers = [];
+    
+    // تشغيل المتصفح بشكل مخفي
+    const browser = await puppeteer.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+    });
+    const page = await browser.newPage();
+    
+    try {
+        await page.goto(`${BASE_URL}/watch.php?id=${channelId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        
+        const buttonsCount = await page.evaluate(() => document.querySelectorAll('.player-btn').length);
+        if (buttonsCount === 0) throw new Error('لم يتم العثور على أزرار مشغلات');
+
+        // فحص أول 3 سيرفرات فقط لتسريع العملية
+        const maxServersToCheck = Math.min(buttonsCount, 3); 
+
+        for (let i = 0; i < maxServersToCheck; i++) {
+            const m3u8Promise = new Promise(resolve => {
+                const requestHandler = request => {
+                    const url = request.url();
+                    if (url.includes('.m3u8')) {
+                        page.off('request', requestHandler);
+                        resolve({ url: url, headers: request.headers() });
+                    }
+                };
+                page.on('request', requestHandler);
+                setTimeout(() => {
+                    page.off('request', requestHandler);
+                    resolve(null);
+                }, 8000); // مهلة 8 ثوانٍ
+            });
+
+            try {
+                await page.evaluate((idx) => {
+                    const btns = document.querySelectorAll('.player-btn');
+                    if (btns[idx]) btns[idx].click();
+                }, i);
+            } catch (e) {}
+
+            const streamData = await m3u8Promise;
+            
+            if (streamData) {
+                servers.push({ 
+                    name: `سيرفر ${i + 1} (Live)`, 
+                    url: streamData.url, 
+                    headers: streamData.headers,
+                    swap: null 
+                });
+            }
+        }
+    } catch (err) {
+        console.error(`خطأ في استخراج قناة ${channelId}:`, err.message);
+    } finally {
+        await browser.close();
+    }
+    
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات تعمل حالياً لهذه القناة');
+    return servers;
+}
+
+// ==========================================
+// جلب معلومات المباراة وعنوانها (للقنوات الأخرى)
 // ==========================================
 async function getMatchInfo(realChannelName) {
     try {
@@ -158,7 +226,7 @@ async function getMatchInfo(realChannelName) {
 }
 
 // ==========================================
-// جلب السيرفرات والمانيفست
+// جلب السيرفرات والمانيفست (للقنوات الأخرى)
 // ==========================================
 async function fetchChannelServers(realChannelName) {
     const channelId = `live_tv_${realChannelName}`;
@@ -247,6 +315,35 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
+// المسار الجديد الخاص بـ BeIN (يستخرج عبر Puppeteer ويحفظ في الكاش)
+app.get('/bein/:id', async (req, res) => {
+    try {
+        const channelId = parseInt(req.params.id);
+        
+        // التحقق من أن رقم القناة صالح (من 91 إلى 99)
+        if (isNaN(channelId) || channelId < 91 || channelId > 99) {
+            return res.send(generateOfflineUI('رقم القناة غير صالح. يجب أن يكون بين 91 و 99'));
+        }
+
+        const matchTitle = `beIN Sports ${channelId - 90} Arabic`;
+        const cacheKey = `bein_servers_${channelId}`;
+        
+        // كاش لمدة 15 دقيقة لتخفيف الضغط عن Puppeteer
+        const cacheDuration = 15 * 60 * 1000; 
+        const servers = await CacheEngine.getOrFetch(cacheKey, () => scrapeBeinChannel(channelId), cacheDuration);
+
+        const userIp = getClientIp(req);
+        const secureToken = generateSecureToken(userIp);
+        const hostUrl = `${req.protocol}://${req.get('host')}`;
+        
+        res.send(generateUI(`bein_${channelId}`, servers, secureToken, matchTitle, hostUrl)); 
+    } catch (error) {
+        console.error(error);
+        res.send(generateOfflineUI('جاري تجهيز البث المباشر، يرجى تحديث الصفحة بعد قليل...'));
+    }
+});
+
+// المسار القديم لباقي القنوات (الـ API)
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -274,7 +371,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        // حظر شامل لبرامج الفحص والبوتات والسكربتات
         const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer', 'bot', 'crawler', 'spider', 'googlebot', 'bingbot'];
         if (blockedAgents.some(agent => userAgent.includes(agent))) return res.status(403).send('Access Denied');
         if (!referer.includes(host) && !referer.includes(mainHost)) return res.status(403).send('Access Denied');
@@ -284,10 +380,25 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         if (!token || !verifySecureToken(token, userIp)) return res.status(403).send('Invalid or Expired Token');
 
         const { hash, serverIndex } = req.params;
-        const realChannel = decodeId(hash);
-        const cacheKey = `manifest_${realChannel}_${serverIndex}`;
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[parseInt(serverIndex)];
+        let servers, serverInfo, cacheKey;
+
+        // دمج بين منطق قنوات BeIN ومنطق القنوات الأخرى
+        if (hash.startsWith('bein_')) {
+            const channelId = parseInt(hash.replace('bein_', ''));
+            const cachedData = CacheEngine.memory.get(`bein_servers_${channelId}`);
+            servers = cachedData ? cachedData.data : null;
+            if (!servers) return res.status(404).send('Stream Expired. Please reload the main page.');
+            serverInfo = servers[parseInt(serverIndex)];
+            cacheKey = `manifest_bein_${channelId}_${serverIndex}`;
+        } else {
+            const realChannel = decodeId(hash);
+            servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
+            serverInfo = servers[parseInt(serverIndex)];
+            cacheKey = `manifest_${realChannel}_${serverIndex}`;
+        }
+
+        if (!serverInfo) return res.status(404).send('Server not found');
+
         const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo), CONFIG.MANIFEST_CACHE);
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -304,7 +415,14 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
-    const embedUrl = `${hostUrl}/play/${channelHash}`;
+    // تحديد رابط الـ Embed بناءً على نوع القناة
+    let embedUrl = '';
+    if (channelHash.startsWith('bein_')) {
+        const id = channelHash.replace('bein_', '');
+        embedUrl = `${hostUrl}/bein/${id}`;
+    } else {
+        embedUrl = `${hostUrl}/play/${channelHash}`;
+    }
 
     const serverItemsHtml = servers.map((srv, idx) => `
         <div class="server-item ${idx === 0 ? 'active' : ''}" onclick="changeServer(${idx}, true)">
@@ -525,7 +643,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         const titleBar = document.getElementById('titleBar');
         let hls = null;
         
-        // المتغيرات للتوكن وتجديدها ديناميكياً
         let currentToken = '${secureToken}';
         const channelHash = '${channelHash}';
         const totalServers = ${totalServers};
@@ -542,9 +659,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 const data = await response.json();
                 if (data && data.token) {
                     currentToken = data.token;
-                    console.log("تم تجديد التوكن بنجاح في الخلفية");
-                    
-                    // تحديث الرابط للمشغل بشكل صامت ودون أي انقطاع
                     if (hls) {
                         const newManifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
                         hls.loadSource(newManifestUrl);
