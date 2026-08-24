@@ -48,6 +48,7 @@ setInterval(() => {
 // ==========================================
 const CONFIG = {
     API_BASE_URL: 'https://sunny-appreciation-production-3d25.up.railway.app/yacintv',
+    TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
@@ -127,9 +128,24 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات المباراة وعنوانها
+// جلب معلومات المباراة أو القناة وعنوانها
 // ==========================================
 async function getMatchInfo(realChannelName) {
+    // 1. فحص إذا كان الطلب يخص قناة فضائية
+    if (realChannelName.startsWith('sat_')) {
+        const channelId = realChannelName.replace('sat_', '');
+        try {
+            const channelData = await CacheEngine.getOrFetch(`sat_channel_info_${channelId}`, async () => {
+                const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 5000 });
+                return res.data;
+            }, CONFIG.CACHE_DURATION);
+            return { isAvailable: true, title: channelData.name || `Channel ${channelId}` };
+        } catch (e) {
+            return { isAvailable: true, title: `beIN Sports ${channelId}` };
+        }
+    }
+
+    // 2. إذا لم تكن قناة فضائية، استكمل بحث المباريات الافتراضي
     try {
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -161,6 +177,21 @@ async function getMatchInfo(realChannelName) {
 // جلب السيرفرات والمانيفست
 // ==========================================
 async function fetchChannelServers(realChannelName) {
+    // 1. جلب بيانات سيرفرات القناة الفضائية
+    if (realChannelName.startsWith('sat_')) {
+        const channelId = realChannelName.replace('sat_', '');
+        const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
+        if (!res.data || !res.data.servers || res.data.servers.length === 0) throw new Error('لا توجد بيانات بالقناة');
+        
+        return res.data.servers.map((srv, i) => ({
+            name: srv.serverName || `سيرفر ${i + 1}`,
+            url: srv.url,
+            headers: srv.headers || {}, // سحب الترويسات الخاصة بكل مشغل
+            swap: null
+        }));
+    }
+
+    // 2. جلب سيرفرات المباريات كما كان سابقاً
     const channelId = `live_tv_${realChannelName}`;
     let dataArray = null;
 
@@ -192,8 +223,15 @@ async function fetchChannelServers(realChannelName) {
 }
 
 async function fetchManifest(serverInfo) {
-    const headers = { 'User-Agent': serverInfo.headers['User-Agent'] || 'Mozilla/5.0' };
-    if (serverInfo.headers['Referer']) headers['Referer'] = serverInfo.headers['Referer'];
+    const headers = { 'User-Agent': serverInfo.headers['user-agent'] || serverInfo.headers['User-Agent'] || 'Mozilla/5.0' };
+    
+    // سحب كافة الترويسات التي أتت مع السيرفر وتمريرها في الطلب
+    if (serverInfo.headers) {
+        Object.keys(serverInfo.headers).forEach(key => {
+            headers[key] = serverInfo.headers[key];
+        });
+    }
+
     const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
     let m3u8 = response.data;
     const baseUrl = serverInfo.url.substring(0, serverInfo.url.lastIndexOf('/') + 1);
@@ -233,6 +271,31 @@ app.get('/api/matches', async (req, res) => {
         res.json(formattedMatches);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch matches' });
+    }
+});
+
+// المسار الجديد لعرض القنوات الفضائية وروابط تشفيرها
+app.get('/api/channels', async (req, res) => {
+    try {
+        const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
+            const response = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
+            return response.data;
+        }, 60000);
+
+        const hostUrl = `${req.protocol}://${req.get('host')}`;
+        
+        // إعادة صياغة الرد ليكون متوافقاً ويقدم رابط تشغيل مباشر لكل قناة
+        const formattedChannels = channels.map(ch => ({
+            id: ch.id,
+            name: ch.name,
+            URl: `${hostUrl}/play/${encodeId(`sat_${ch.id}`)}`
+        }));
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.json(formattedChannels);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch TV channels' });
     }
 });
 
@@ -888,3 +951,4 @@ function generateOfflineUI(reasonMsg) {
 app.listen(PORT, () => {
     console.log(`🚀 Secure Monetized Player running on port ${PORT}`);
 });
+```[cite: 1]
