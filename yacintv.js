@@ -1,7 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const puppeteer = require('puppeteer'); // تمت إضافة مكتبة Puppeteer
+const puppeteer = require('puppeteer');
 const app = express();
 
 // إخفاء ترويسات السيرفر وحماية الأساسيات
@@ -134,11 +134,19 @@ async function scrapeBeinChannel(channelId) {
     const BASE_URL = 'https://dlstreams.st';
     const servers = [];
     
-    // تشغيل المتصفح بشكل مخفي
+    // تشغيل المتصفح بإعدادات خفيفة جداً تناسب منصة Render
     const browser = await puppeteer.launch({ 
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-dev-shm-usage', // يمنع امتلاء الذاكرة المؤقتة
+            '--disable-gpu',           // تعطيل الجرافيكس لتخفيف العبء
+            '--single-process',        // مهم جداً: يقلل استهلاك الرامات للنصف
+            '--no-zygote'
+        ] 
     });
+    
     const page = await browser.newPage();
     
     try {
@@ -415,7 +423,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
-    // تحديد رابط الـ Embed بناءً على نوع القناة
     let embedUrl = '';
     if (channelHash.startsWith('bein_')) {
         const id = channelHash.replace('bein_', '');
@@ -498,30 +505,13 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
         }
 
-        .glass-bar.title-bar { 
-            width: 95%; max-width: 980px; 
-            height: 68px;
-            top: 25px; 
-        }
-        
-        .glass-bar.controls-bar { 
-            width: 86%; max-width: 820px; 
-            bottom: 25px;
-        }
+        .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
+        .glass-bar.controls-bar { width: 86%; max-width: 820px; bottom: 25px; }
 
         .player-container.hide-ui { cursor: none; }
-        
-        .player-container.hide-ui .glass-bar {
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        .player-container.hide-ui .glass-bar.title-bar {
-            transform: translate(-50%, -15px);
-        }
-        .player-container.hide-ui .glass-bar.controls-bar {
-            transform: translate(-50%, 15px);
-        }
+        .player-container.hide-ui .glass-bar { opacity: 0; pointer-events: none; }
+        .player-container.hide-ui .glass-bar.title-bar { transform: translate(-50%, -15px); }
+        .player-container.hide-ui .glass-bar.controls-bar { transform: translate(-50%, 15px); }
 
         .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; transition: opacity 0.2s; letter-spacing: 0.5px; }
         .logo-text:hover { opacity: 0.8; }
@@ -985,20 +975,20 @@ function generateOfflineUI(reasonMsg) {
                 document.body.appendChild(anchor);
                 anchor.click();
                 document.body.removeChild(anchor);
-                
-                setTimeout(() => { adOpened = false; }, 10 * 60 * 1000);
+                setTimeout(() => { adOpened = false; }, 10 * 60 * 1000); 
             }
         }
-        
         document.addEventListener('click', triggerSmartAd, { capture: true });
         document.addEventListener('touchend', triggerSmartAd, { capture: true });
-        
-        setTimeout(() => { location.reload(); }, 60 * 1000);
+
+        // إعادة تحميل الصفحة تلقائياً كل 40 ثانية إذا كان البث غير متوفر
+        setTimeout(function() {
+            window.location.reload();
+        }, 40000);
     </script>
 </body>
 </html>`;
 }
 
-app.listen(PORT, () => {
-    console.log(`🚀 Secure Monetized Player running on port ${PORT}`);
-});
+// بدء السيرفر
+app.listen(PORT, () => console.log(`Server running securely on port ${PORT}`));
