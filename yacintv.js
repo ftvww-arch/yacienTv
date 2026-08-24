@@ -1,335 +1,142 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const app = express();
 
-// إخفاء ترويسات السيرفر وحماية الأساسيات
-app.disable('x-powered-by');
-app.set('trust proxy', 1);
+const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ==========================================
-// حماية خفيفة وسريعة ضد السبام والضغط (Rate Limiter)
-// ==========================================
-const requestCounts = new Map();
-app.use((req, res, next) => {
-    const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
-    const now = Date.now();
-    const windowMs = 60 * 1000; // دقيقة واحدة
-    const maxRequests = 120; // الحد الأقصى للطلبات لكل IP في الدقيقة
-
-    if (!requestCounts.has(ip)) {
-        requestCounts.set(ip, { count: 1, startTime: now });
-    } else {
-        let data = requestCounts.get(ip);
-        if (now - data.startTime > windowMs) {
-            data.count = 1;
-            data.startTime = now;
-        } else {
-            data.count++;
-            if (data.count > maxRequests) {
-                return res.status(429).send('Too Many Requests');
-            }
-        }
-    }
-    next();
-});
-
-// تنظيف دوري للذاكرة المؤقتة للـ Rate Limiter
-setInterval(() => {
-    const now = Date.now();
-    for (const [ip, data] of requestCounts.entries()) {
-        if (now - data.startTime > 120000) requestCounts.delete(ip);
-    }
-}, 60000);
-
-// ==========================================
-// الإعدادات العامة 
-// ==========================================
 const CONFIG = {
-    API_BASE_URL: 'https://sunny-appreciation-production-3d25.up.railway.app/yacintv',
-    TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
-    CACHE_DURATION: 300000, 
-    MANIFEST_CACHE: 2000,    
-    SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
-    TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
-    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
+    MAIN_WEBSITE: 'https://ytplus.com',
+    SECRET_KEY: 'yacine_tv_secret_key_pro_2026',
+    CACHE_DURATION: 10 * 60 * 1000, // 10 دقائق
+    MANIFEST_CACHE: 4 * 1000        // 4 ثوانٍ للبث المباشر
 };
 
-process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
-process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
+// ==========================================
+// محرك التخزين المؤقت (Cache Engine)
+// ==========================================
+const CacheEngine = {
+    store: new Map(),
+    async getOrFetch(key, fetchFn, ttl) {
+        const now = Date.now();
+        if (this.store.has(key)) {
+            const cached = this.store.get(key);
+            if (now < cached.expiry) return cached.data;
+        }
+        const freshData = await fetchFn();
+        if (freshData) {
+            this.store.set(key, { data: freshData, expiry: now + ttl });
+        }
+        return freshData;
+    }
+};
 
 // ==========================================
-// دوال التشفير والأمان
+// أدوات الأمان والتشفير (Security Helpers)
 // ==========================================
+function getClientIp(req) {
+    return req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress || '';
+}
+
 function generateSecureToken(ip) {
-    const expires = Date.now() + CONFIG.TOKEN_EXPIRY;
-    const data = `${ip}:${expires}`;
-    const signature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(data).digest('hex');
-    return Buffer.from(`${data}:${signature}`).toString('base64');
+    const timeWindow = Math.floor(Date.now() / (1000 * 60 * 10));
+    return crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${ip}_${timeWindow}`).digest('hex');
 }
 
 function verifySecureToken(token, ip) {
-    try {
-        const decoded = Buffer.from(token, 'base64').toString('utf8');
-        const [tokenIp, expires, signature] = decoded.split(':');
-        if (Date.now() > parseInt(expires)) return false; 
-        const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${tokenIp}:${expires}`).digest('hex');
-        return signature === expectedSignature && tokenIp === ip;
-    } catch (e) {
-        return false;
-    }
+    const currentToken = generateSecureToken(ip);
+    const prevTimeWindow = Math.floor((Date.now() - 1000 * 60 * 10) / (1000 * 60 * 10));
+    const prevToken = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${ip}_${prevTimeWindow}`).digest('hex');
+    return token === currentToken || token === prevToken;
 }
 
-function getClientIp(req) { 
-    return req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip; 
+function encodeId(id) {
+    return Buffer.from(id.toString()).toString('base64').replace(/=/g, '');
 }
 
-function encodeId(text) { return Buffer.from(text).toString('hex'); }
-function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
+function decodeId(encoded) {
+    return Buffer.from(encoded, 'base64').toString('ascii');
+}
 
 // ==========================================
-// محرك الكاش (Cache Engine)
+// تحويل المسارات النسبية داخل m3u8 لروابط كاملة
 // ==========================================
-const CacheEngine = {
-    memory: new Map(),
-    inFlight: new Map(),
-    async getOrFetch(key, fetcher, ttl) {
-        const cached = this.memory.get(key);
-        if (cached && cached.expiresAt > Date.now()) return cached.data;
-        if (this.inFlight.has(key)) return new Promise((resolve, reject) => { this.inFlight.get(key).push({ resolve, reject }); });
-        
-        this.inFlight.set(key, []);
-        try {
-            const data = await fetcher();
-            if (this.memory.size > 300) {
-                const firstKey = this.memory.keys().next().value;
-                this.memory.delete(firstKey);
+function convertManifestToAbsolute(manifestText, baseUrl) {
+    if (!manifestText || typeof manifestText !== 'string') return manifestText;
+    return manifestText.split('\n').map(line => {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#')) {
+            try {
+                return new URL(trimmed, baseUrl).href;
+            } catch (e) {
+                return trimmed;
             }
-            this.memory.set(key, { data, expiresAt: Date.now() + ttl });
-            const waiters = this.inFlight.get(key);
-            this.inFlight.delete(key);
-            waiters.forEach(w => w.resolve(data));
-            return data;
-        } catch (error) {
-            const waiters = this.inFlight.get(key);
-            this.inFlight.delete(key);
-            waiters.forEach(w => w.reject(error));
-            throw error;
         }
-    }
-};
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of CacheEngine.memory.entries()) {
-        if (now > value.expiresAt) CacheEngine.memory.delete(key);
-    }
-}, 30000);
-
-// ==========================================
-// جلب معلومات المباراة أو القناة وعنوانها
-// ==========================================
-async function getMatchInfo(realChannelName) {
-    // 1. فحص إذا كان الطلب يخص قناة فضائية
-    if (realChannelName.startsWith('sat_')) {
-        const channelId = realChannelName.replace('sat_', '');
-        try {
-            const channelData = await CacheEngine.getOrFetch(`sat_channel_info_${channelId}`, async () => {
-                const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 5000 });
-                return res.data;
-            }, CONFIG.CACHE_DURATION);
-            return { isAvailable: true, title: channelData.name || `Channel ${channelId}` };
-        } catch (e) {
-            return { isAvailable: true, title: `beIN Sports ${channelId}` };
-        }
-    }
-
-    // 2. إذا لم تكن قناة فضائية، استكمل بحث المباريات الافتراضي
-    try {
-        const matches = await CacheEngine.getOrFetch('matches_list', async () => {
-            const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
-            return res.data;
-        }, 60000);
-
-        const channelId = `live_tv_${realChannelName}`;
-        const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
-
-        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
-        
-        const channelField = targetMatch.channel || targetMatch.id_live;
-        if (!channelField || channelField.trim() === '') {
-            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
-        }
-
-        let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
-        if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
-            matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
-        }
-
-        return { isAvailable: true, title: matchTitle };
-    } catch (e) {
-        return { isAvailable: true, title: realChannelName }; 
-    }
+        return line;
+    }).join('\n');
 }
 
 // ==========================================
-// جلب السيرفرات والمانيفست
+// جلب خوادم البث المباشر والمانيفست
 // ==========================================
-async function fetchChannelServers(realChannelName) {
-    // 1. جلب بيانات سيرفرات القناة الفضائية
-    if (realChannelName.startsWith('sat_')) {
-        const channelId = realChannelName.replace('sat_', '');
-        const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
-        if (!res.data || !res.data.servers || res.data.servers.length === 0) throw new Error('لا توجد بيانات بالقناة');
-        
-        return res.data.servers.map((srv, i) => ({
-            name: srv.serverName || `سيرفر ${i + 1}`,
-            url: srv.url,
-            headers: srv.headers || {}, // سحب الترويسات الخاصة بكل مشغل
-            swap: null
-        }));
-    }
-
-    // 2. جلب سيرفرات المباريات كما كان سابقاً
-    const channelId = `live_tv_${realChannelName}`;
-    let dataArray = null;
-
+async function fetchChannelServers(realChannel) {
     try {
-        const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { params: { id_live: channelId }, headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 8000 });
-        if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
-    } catch (e) {}
-
-    if (!dataArray || dataArray.length === 0) {
-        try {
-            const response2 = await axios.get(`${CONFIG.API_BASE_URL}/live_id/${channelId}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 8000 });
-            if (response2.data) dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
-        } catch (e) {}
+        // يمكنك ربط هذه الدالة بمصدر جلب السيرفرات الخاص بك
+        return [
+            { name: 'Server 1 (FHD)', url: `https://xameleon.phantemlis.top/four/secure/be694e665d6767814a06d933abb82aaf/1787574267/premium91/index.m3u8` },
+            { name: 'Server 2 (HD)', url: `https://xameleon.phantemlis.top/four/secure/be694e665d6767814a06d933abb82aaf/1787574267/premium91/tracks-v1a1/mono.m3u8` }
+        ];
+    } catch (e) {
+        return [];
     }
-
-    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات');
-
-    const servers = [];
-    dataArray.forEach((srv, i) => {
-        if (srv.result !== 0 || !srv.data) return;
-        try {
-            let rawUrl = srv.data.url;
-            let innerData = typeof rawUrl === 'string' && rawUrl.trim().startsWith('{') ? JSON.parse(rawUrl.trim()) : { url: rawUrl.trim() };
-            servers.push({ name: srv.name || `سيرفر ${i + 1}`, url: innerData.url, headers: innerData.headers || {}, swap: innerData.swap || null });
-        } catch (e) {}
-    });
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات');
-    return servers;
 }
 
 async function fetchManifest(serverInfo) {
-    const headers = { 'User-Agent': serverInfo.headers['user-agent'] || serverInfo.headers['User-Agent'] || 'Mozilla/5.0' };
-    
-    // سحب كافة الترويسات التي أتت مع السيرفر وتمريرها في الطلب
-    if (serverInfo.headers) {
-        Object.keys(serverInfo.headers).forEach(key => {
-            headers[key] = serverInfo.headers[key];
-        });
-    }
-
-    const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
-    let m3u8 = response.data;
-    const baseUrl = serverInfo.url.substring(0, serverInfo.url.lastIndexOf('/') + 1);
-    const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
-    const swapVal = swapKey ? serverInfo.swap[swapKey] : null;
-
-    m3u8 = m3u8.replace(/^(?!#)(.*)$/gm, (line) => {
-        let url = line.trim();
-        if (!url || url.startsWith('#')) return line;
-        if (!url.startsWith('http')) url = baseUrl + url;
-        if (swapKey && url.includes(swapKey)) url = url.replace(swapKey, swapVal);
-        return url;
+    const targetUrl = typeof serverInfo === 'string' ? serverInfo : (serverInfo.url || serverInfo);
+    const response = await axios.get(targetUrl, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Referer': 'https://xameleon.phantemlis.top/'
+        },
+        timeout: 8000
     });
-    return m3u8;
+    return response.data;
 }
 
 // ==========================================
 // المسارات (Routes)
 // ==========================================
-app.get('/api/matches', async (req, res) => {
+
+// 1. مسار المشغل الرئيسي
+app.get('/play/:channelHash', async (req, res) => {
     try {
-        const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
-        const matches = response.data;
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-
-        const formattedMatches = matches.map(match => {
-            let channelStr = match.channel || match.id_live || '';
-            let cleanChannel = channelStr.startsWith('live_tv_') ? channelStr.replace('live_tv_', '') : channelStr;
-            let embedUrl = cleanChannel ? `${hostUrl}/play/${encodeId(cleanChannel)}` : '';
-            
-            const { id_live, channel, ...safeMatch } = match;
-            return { ...safeMatch, URl: embedUrl };
-        });
-
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.json(formattedMatches);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch matches' });
-    }
-});
-
-// المسار الجديد لعرض القنوات الفضائية وروابط تشفيرها
-app.get('/api/channels', async (req, res) => {
-    try {
-        const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
-            const response = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
-            return response.data;
-        }, 60000);
-
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-        
-        // إعادة صياغة الرد ليكون متوافقاً ويقدم رابط تشغيل مباشر لكل قناة
-        const formattedChannels = channels.map(ch => ({
-            id: ch.id,
-            name: ch.name,
-            URl: `${hostUrl}/play/${encodeId(`sat_${ch.id}`)}`
-        }));
-
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.json(formattedChannels);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch TV channels' });
-    }
-});
-
-app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
-
-// مسار تجديد التوكن في الخلفية دون قطع البث أو إعادة التحميل
-app.get('/api/refresh-token', (req, res) => {
-    const userIp = getClientIp(req);
-    const newToken = generateSecureToken(userIp);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.json({ token: newToken });
-});
-
-app.get('/play/:hash', async (req, res) => {
-    try {
-        const hash = req.params.hash;
-        const realChannel = decodeId(hash);
-        if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
-
-        const matchInfo = await getMatchInfo(realChannel);
-        if (!matchInfo.isAvailable) return res.send(generateOfflineUI(matchInfo.reason));
-
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
+        const { channelHash } = req.params;
+        const realChannel = decodeId(channelHash);
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `${req.protocol}://${req.get('host')}`;
+
+        const servers = await CacheEngine.getOrFetch(
+            `servers_${realChannel}`,
+            () => fetchChannelServers(realChannel),
+            CONFIG.CACHE_DURATION
+        );
+
+        if (!servers || servers.length === 0) {
+            return res.status(404).send('Channel or Stream Not Found');
+        }
+
+        const matchTitle = `بث مباشر - قناة ${realChannel}`;
+        const html = generateUI(channelHash, servers, secureToken, matchTitle, hostUrl);
         
-        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
+        res.setHeader('Content-Type', 'text/html');
+        res.send(html);
     } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً'));
+        res.status(500).send('Server Error');
     }
 });
 
+// 2. مسار جلب ملف المانيفست المباشر
 app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
         const userAgent = (req.headers['user-agent'] || '').toLowerCase();
@@ -337,7 +144,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        // حظر شامل لبرامج الفحص والبوتات والسكربتات
+        // حظر السكربتات والبوتات
         const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer', 'bot', 'crawler', 'spider', 'googlebot', 'bingbot'];
         if (blockedAgents.some(agent => userAgent.includes(agent))) return res.status(403).send('Access Denied');
         if (!referer.includes(host) && !referer.includes(mainHost)) return res.status(403).send('Access Denied');
@@ -350,16 +157,13 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const realChannel = decodeId(hash);
         const cacheKey = `manifest_${realChannel}_${serverIndex}`;
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        let serverInfo = servers[parseInt(serverIndex)];
+        const serverInfo = servers[parseInt(serverIndex)];
 
-        // تحويل الرابط تلقائياً من index.m3u8 إلى ملف القطع المباشر (mono.m3u8)
-        if (typeof serverInfo === 'string' && serverInfo.includes('index.m3u8')) {
-            serverInfo = serverInfo.replace('index.m3u8', 'tracks-v1a1/mono.m3u8');
-        } else if (serverInfo && serverInfo.url && serverInfo.url.includes('index.m3u8')) {
-            serverInfo = { ...serverInfo, url: serverInfo.url.replace('index.m3u8', 'tracks-v1a1/mono.m3u8') };
-        }
-
-        const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo), CONFIG.MANIFEST_CACHE);
+        const manifestData = await CacheEngine.getOrFetch(cacheKey, async () => {
+            const rawManifest = await fetchManifest(serverInfo);
+            const targetUrl = typeof serverInfo === 'string' ? serverInfo : (serverInfo.url || serverInfo);
+            return convertManifestToAbsolute(rawManifest, targetUrl);
+        }, CONFIG.MANIFEST_CACHE);
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -370,13 +174,15 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     }
 });
 
-
-
-
-
+// 3. مسار تجديد التوكن
+app.get('/api/refresh-token', (req, res) => {
+    const userIp = getClientIp(req);
+    const token = generateSecureToken(userIp);
+    res.json({ token });
+});
 
 // ==========================================
-// الواجهة الديناميكية النهائية (المشغل مع دعم ZSTD والتجديد الذاتي)
+// الواجهة الديناميكية للمشغل (UI Generator)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -401,30 +207,25 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>${matchTitle}</title>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-    
-    <!-- استدعاء مكتبة HLS.js -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    
-    <!-- استدعاء مكتبة فك ضغط ZSTD للمتصفح -->
     <script src="https://cdn.jsdelivr.net/npm/fzstd/umd/index.js"></script>
-    
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body, html { height: 100%; width: 100%; background-color: #000; font-family: 'Tajawal', sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; }
-        .player-container { position: relative; width: 100%; height: 100%; max-width: 1200px; max-height: 800px; background-color: #000; overflow: hidden; cursor: default; user-select: none; -webkit-user-select: none; }
+        .player-container { position: relative; width: 100%; height: 100%; max-width: 1200px; max-height: 800px; background-color: #000; overflow: hidden; cursor: default; user-select: none; }
         .loading-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 25; transition: opacity 0.4s ease; }
         .spinner { width: 50px; height: 50px; border: 4px solid rgba(255, 255, 255, 0.1); border-top: 4px solid #5c4dff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
-        .loading-text { color: #fff; font-size: 15px; font-weight: 500; letter-spacing: 0.5px; }
+        .loading-text { color: #fff; font-size: 15px; font-weight: 500; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
-        .glass-bar { position: absolute; left: 50%; transform: translateX(-50%); z-index: 10; height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-radius: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); transition: opacity 0.4s ease, transform 0.4s ease; }
+        .glass-bar { position: absolute; left: 50%; transform: translateX(-50%); z-index: 10; height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px); border-radius: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); transition: opacity 0.4s ease, transform 0.4s ease; }
         .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
         .glass-bar.controls-bar { width: 86%; max-width: 820px; bottom: 25px; }
         .player-container.hide-ui { cursor: none; }
         .player-container.hide-ui .glass-bar { opacity: 0; pointer-events: none; }
         .player-container.hide-ui .glass-bar.title-bar { transform: translate(-50%, -15px); }
         .player-container.hide-ui .glass-bar.controls-bar { transform: translate(-50%, 15px); }
-        .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; transition: opacity 0.2s; }
+        .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; }
         .video-title { color: #e5e7eb; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; }
         .left-controls { display: flex; align-items: center; gap: 8px; width: 100px; }
         .live-dot { width: 8px; height: 8px; background-color: #ff3b30; border-radius: 50%; box-shadow: 0 0 8px rgba(255, 59, 48, 0.8); }
@@ -439,7 +240,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         .icon-svg { fill: #d1d5db; width: 20px; height: 20px; }
         .server-popup { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 340px; background: rgba(20, 22, 35, 0.96); backdrop-filter: blur(16px); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.12); color: white; z-index: 100; padding: 20px; box-shadow: 0 20px 50px rgba(0,0,0,0.8); }
         .popup-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }
-        .popup-title .en { font-size: 11px; color: #9ca3af; text-transform: uppercase; font-weight: 500; }
+        .popup-title .en { font-size: 11px; color: #9ca3af; font-weight: 500; }
         .popup-title .ar { font-size: 14px; font-weight: 700; margin-top: 2px; }
         .close-server-popup { background: none; border: none; color: #9ca3af; font-size: 20px; cursor: pointer; }
         .server-list { display: flex; flex-direction: column; gap: 6px; max-height: 250px; overflow-y: auto; }
@@ -505,7 +306,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         const video = document.getElementById('video');
         const playerContainer = document.getElementById('playerContainer');
         const loadingOverlay = document.getElementById('loadingOverlay');
-        const titleBar = document.getElementById('titleBar');
         let hls = null;
         
         let currentToken = '${secureToken}';
@@ -530,9 +330,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             } catch (e) {}
         }, 8 * 60 * 1000);
 
-        // ==============================================================
-        // نظام فك الضغط (ZSTD) المباشر عبر HLS.js Loader
-        // ==============================================================
+        // محمل مخصص لفك ضغط قطعة الفيديو (.zst) في المتصفح تلقائياً
         class ZstdFragmentLoader extends Hls.DefaultConfig.loader {
             constructor(config) {
                 super(config);
@@ -540,12 +338,11 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 this.load = function (context, config, callbacks) {
                     const originalOnSuccess = callbacks.onSuccess;
                     callbacks.onSuccess = function (response, stats, context, networkDetails) {
-                        // إذا كان الرابط ينتهي بصيغة zst، قم بفك الضغط قبل إرساله للمشغل
                         if (context.url.includes('.zst')) {
                             try {
                                 const compressed = new Uint8Array(response.data);
                                 const decompressed = fzstd.decompress(compressed);
-                                response.data = decompressed.buffer; // إرجاعها كـ ArrayBuffer نظيف
+                                response.data = decompressed.buffer;
                             } catch (e) {
                                 console.error("ZSTD Decompression error:", e);
                             }
@@ -556,7 +353,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 };
             }
         }
-        // ==============================================================
 
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
@@ -593,7 +389,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
-                // تفعيل Loader الخاص بفك الضغط هنا
                 hls = new Hls({
                     fLoader: ZstdFragmentLoader
                 }); 
@@ -645,7 +440,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             else { pauseIcon.style.display = 'none'; playIcon.style.display = 'block'; }
         }
 
-        // إخفاء اختصارات الأزرار والنوافذ الفرعية
         document.getElementById('fullscreenBtn').addEventListener('click', (e) => { 
             e.stopPropagation(); 
             if (!document.fullscreenElement) {
@@ -664,95 +458,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             document.getElementById('embedCodeArea').select(); document.execCommand('copy'); alert('تم نسخ كود التضمين!'); embedModal.style.display = 'none';
         });
 
-    </script>
-</body>
-</html>`;
-}
-
-// ==========================================
-// تصميم صفحة (البث غير متوفر حالياً) الاحترافي
-// ==========================================
-function generateOfflineUI(reasonMsg) {
-    return `
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>البث غير متوفر</title>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <style>
-        body { 
-            margin: 0; padding: 0; 
-            background: #000 url('https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1920&q=80') center/cover no-repeat; 
-            display: flex; justify-content: center; align-items: center; 
-            height: 100vh; font-family: 'Tajawal', sans-serif; 
-        }
-        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 12, 16, 0.88); z-index: 1; }
-        .container { 
-            position: relative; z-index: 2; text-align: center; 
-            background: rgba(20,22,35,0.7); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-            padding: 50px 40px; border-radius: 20px; 
-            border: 1px solid rgba(255, 255, 255, 0.1); 
-            box-shadow: 0 30px 60px rgba(0,0,0,0.8); width: 90%; max-width: 500px; 
-        }
-        .icon-container { display: flex; justify-content: center; margin-bottom: 20px; }
-        .icon { width: 65px; height: 65px; fill: #5c4dff; animation: pulse 2s infinite ease-in-out; }
-        @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }
-        h2 { color: #fff; margin-bottom: 12px; font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }
-        .reason { color: #f59e0b; font-size: 18px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 6px 16px; border-radius: 8px; }
-        .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; font-weight: 500; }
-        .btn { 
-            display: inline-block; background: linear-gradient(135deg, #5c4dff, #4a3be0); 
-            color: #fff; padding: 14px 34px; text-decoration: none; font-size: 16px; 
-            font-weight: 700; border-radius: 50px; transition: all 0.3s ease; 
-            box-shadow: 0 4px 15px rgba(92, 77, 255, 0.4); 
-        }
-        .btn:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(92, 77, 255, 0.6); }
-        .refresh-text { margin-top: 20px; font-size: 13px; color: #6b7280; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 6px; }
-        .refresh-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; box-shadow: 0 0 8px rgba(16, 185, 129, 0.6); animation: blink 1.5s infinite; }
-        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-    </style>
-</head>
-<body>
-    <div class="overlay"></div>
-    <div class="container">
-        <div class="icon-container">
-            <svg class="icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
-        </div>
-        <h2>عفواً، البث غير متاح حالياً</h2>
-        <div class="reason">${reasonMsg}</div>
-        <div class="message">لم تبدأ المباراة بعد، أو تم إيقاف البث مؤقتاً.<br>يرجى البقاء في هذه الصفحة، سيبدأ البث التلقائي فور بدء الحدث!</div>
-        <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي</a>
-        <div class="refresh-text"><div class="refresh-dot"></div> سيتم تحديث الصفحة تلقائياً للتحقق من البث</div>
-    </div>
-    
-    <script>
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
-
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                
-                setTimeout(() => { adOpened = false; }, 10 * 60 * 1000);
-            }
-        }
-        
-        document.addEventListener('click', triggerSmartAd, { capture: true });
-        document.addEventListener('touchend', triggerSmartAd, { capture: true });
-        
-        setTimeout(() => { location.reload(); }, 60 * 1000);
     </script>
 </body>
 </html>`;
