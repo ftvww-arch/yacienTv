@@ -170,6 +170,69 @@ app.get('/api/live/stream-url/:streamId', (req, res) => {
     }
 });
 
+
+// ==========================================
+// قسم الأفلام (VOD / Movies)
+// ==========================================
+
+// 1. جلب فئات (أقسام) الأفلام
+app.get('/api/movies/categories', async (req, res) => {
+    try {
+        const url = `${SERVER_URL}/player_api.php?username=${USERNAME}&password=${PASSWORD}&action=get_vod_categories`;
+        const response = await axios.get(url);
+        res.json({ success: true, count: response.data.length, data: response.data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 2. جلب قائمة الأفلام (كل الأفلام أو حسب category_id)
+app.get('/api/movies/streams', async (req, res) => {
+    try {
+        const { category_id } = req.query;
+        let url = `${SERVER_URL}/player_api.php?username=${USERNAME}&password=${PASSWORD}&action=get_vod_streams`;
+        if (category_id) {
+            url += `&category_id=${category_id}`;
+        }
+        const response = await axios.get(url);
+        res.json({ success: true, count: response.data.length, data: response.data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 3. جلب تفاصيل الفيلم (القصة، الممثلين، التقييم، البوستر، الجودة)
+app.get('/api/movies/info/:vodId', async (req, res) => {
+    try {
+        const { vodId } = req.params;
+        const url = `${SERVER_URL}/player_api.php?username=${USERNAME}&password=${PASSWORD}&action=get_vod_info&vod_id=${vodId}`;
+        const response = await axios.get(url);
+        res.json({ success: true, data: response.data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 4. استخراج رابط المشاهدة المباشر للفيلم (صيغة JSON)
+app.get('/api/movies/stream-url/:streamId', async (req, res) => {
+    try {
+        const { streamId } = req.params;
+        // الامتداد الافتراضي للأفلام هو mp4 أو mkv حسب القناة (يمكن جلب الامتداد الأصلي من بيانات الفيلم container_extension)
+        const containerExtension = req.query.ext || 'mp4';
+
+        // تركيب رابط الفيلم المباشر
+        const directMovieUrl = `${SERVER_URL}/movie/${USERNAME}/${PASSWORD}/${streamId}.${containerExtension}`;
+
+        res.json({
+            success: true,
+            stream_id: streamId,
+            extension: containerExtension,
+            stream_url: directMovieUrl
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 // تشغيل السيرفر
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
