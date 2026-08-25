@@ -145,6 +145,31 @@ app.get('/api/series/info/:seriesId', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// مسار إرجاع رابط البث المباشر للقناة صيغة JSON
+// ==========================================
+app.get('/api/live/stream-url/:streamId', (req, res) => {
+    try {
+        const { streamId } = req.params;
+        // يمكنك تحديد الصيغة عبر query string: ?ext=ts أو مبيناً كـ m3u8 افتراضياً
+        const extension = req.query.ext || 'm3u8';
+
+        // تركيب رابط البث المباشر المباشر
+        const directStreamUrl = `${SERVER_URL}/live/${USERNAME}/${PASSWORD}/${streamId}.${extension}`;
+
+        // إرجاع النتيجة كـ JSON يفهمها تطبيقك
+        res.json({
+            success: true,
+            stream_id: streamId,
+            format: extension,
+            stream_url: directStreamUrl
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // تشغيل السيرفر
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
