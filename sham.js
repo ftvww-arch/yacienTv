@@ -6,15 +6,16 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-const PORT = 3000;
+// استخراج البورت الموفر من بيئة تشغيل Render
+const PORT = process.env.PORT || 3000;
 
-// ثوابت الاتصال بسيرفر الـ Xtream بناءً على الرابط الذي أرسلته
+// ثوابت الاتصال بسيرفر الـ Xtream
 const SERVER_URL = 'http://orien.live';
 const USERNAME = '16304575049793';
 const PASSWORD = '43581893985883';
 
 // ==========================================
-وحدة الحساب (Account Info)
+// وحدة الحساب (Account Info)
 // ==========================================
 app.get('/api/account/info', async (req, res) => {
     try {
@@ -31,7 +32,7 @@ app.get('/api/account/info', async (req, res) => {
 });
 
 // ==========================================
-1. قسم القنوات الحية (Live TV)
+// 1. قسم القنوات الحية (Live TV)
 // ==========================================
 
 // أ. جلب فئات القنوات الحية
@@ -45,7 +46,7 @@ app.get('/api/live/categories', async (req, res) => {
     }
 });
 
-// ب. جلب جميع القنوات الحية أو حسب الفئة (category_id اختياري)
+// ب. جلب جميع القنوات الحية أو حسب الفئة
 app.get('/api/live/streams', async (req, res) => {
     try {
         const { category_id } = req.query;
@@ -60,9 +61,8 @@ app.get('/api/live/streams', async (req, res) => {
     }
 });
 
-
 // ==========================================
-2. قسم الأفلام (VOD / Movies)
+// 2. قسم الأفلام (VOD / Movies)
 // ==========================================
 
 // أ. جلب فئات الأفلام
@@ -91,7 +91,7 @@ app.get('/api/movies/streams', async (req, res) => {
     }
 });
 
-// ج. جلب معلومات فيلم معين (قصة، مخرج، تقييم، بوستر) عبر الـ vod_id
+// ج. جلب معلومات فيلم معين عبر الـ vod_id
 app.get('/api/movies/info/:vodId', async (req, res) => {
     try {
         const { vodId } = req.params;
@@ -103,9 +103,8 @@ app.get('/api/movies/info/:vodId', async (req, res) => {
     }
 });
 
-
 // ==========================================
-3. قسم المسلسلات (Series)
+// 3. قسم المسلسلات (Series)
 // ==========================================
 
 // أ. جلب فئات المسلسلات
@@ -134,7 +133,7 @@ app.get('/api/series/streams', async (req, res) => {
     }
 });
 
-// ج. جلب تفاصيل المسلسل (المواسم، الحلقات، القصة) عبر الـ series_id
+// ج. جلب تفاصيل المسلسل عبر الـ series_id
 app.get('/api/series/info/:seriesId', async (req, res) => {
     try {
         const { seriesId } = req.params;
@@ -148,5 +147,5 @@ app.get('/api/series/info/:seriesId', async (req, res) => {
 
 // تشغيل السيرفر
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
 });
