@@ -233,6 +233,79 @@ app.get('/api/movies/stream-url/:streamId', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+
+// ==========================================
+// قسم المسلسلات (Series & Episodes)
+// ==========================================
+
+// 1. جلب فئات (أقسام) المسلسلات
+app.get('/api/series/categories', async (req, res) => {
+    try {
+        const url = `${SERVER_URL}/player_api.php?username=${USERNAME}&password=${PASSWORD}&action=get_series_categories`;
+        const response = await axios.get(url);
+        res.json({ success: true, count: response.data.length, data: response.data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 2. جلب قائمة المسلسلات (الكل أو حسب الفئة category_id)
+app.get('/api/series/streams', async (req, res) => {
+    try {
+        const { category_id } = req.query;
+        let url = `${SERVER_URL}/player_api.php?username=${USERNAME}&password=${PASSWORD}&action=get_series`;
+        if (category_id) {
+            url += `&category_id=${category_id}`;
+        }
+        const response = await axios.get(url);
+        res.json({ success: true, count: response.data.length, data: response.data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 3. جلب تفاصيل مسلسل معين (المواسم + قائمة الحلقات كاملة + القصة والبوستر)
+app.get('/api/series/info/:seriesId', async (req, res) => {
+    try {
+        const { seriesId } = req.params;
+        const url = `${SERVER_URL}/player_api.php?username=${USERNAME}&password=${PASSWORD}&action=get_series_info&series_id=${seriesId}`;
+        const response = await axios.get(url);
+        
+        // إرجاع تفاصيل المسلسل مع قائمة الحلقات مقسمة حسب المواسم
+        res.json({
+            success: true,
+            info: response.data.info,
+            seasons: response.data.seasons,
+            episodes: response.data.episodes // تحتوي على الحلقات ورقم episode_id الخاص بكل حلقة
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 4. استخراج رابط التشغيل المباشر للحلقة (عبر episode_id و container_extension)
+app.get('/api/series/episode-url/:episodeId', (req, res) => {
+    try {
+        const { episodeId } = req.params;
+        // الامتداد الافتراضي للحلقات غالباً mp4 أو mkv
+        const extension = req.query.ext || 'mp4';
+
+        // تركيب رابط تشغيل الحلقة المباشر
+        const episodeStreamUrl = `${SERVER_URL}/series/${USERNAME}/${PASSWORD}/${episodeId}.${extension}`;
+
+        res.json({
+            success: true,
+            episode_id: episodeId,
+            extension: extension,
+            stream_url: episodeStreamUrl
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
 // تشغيل السيرفر
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
