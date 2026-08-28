@@ -191,19 +191,34 @@ async function fetchChannelServers(realChannelName) {
     return servers;
 }
 
+// تحديث الدالة لمعالجة الروابط المطلقة وإضافة ترويسات الحماية
 async function fetchManifest(serverInfo) {
-    const headers = { 'User-Agent': serverInfo.headers['User-Agent'] || 'Mozilla/5.0' };
+    const headers = { 
+        'User-Agent': serverInfo.headers['User-Agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*'
+    };
     if (serverInfo.headers['Referer']) headers['Referer'] = serverInfo.headers['Referer'];
-    const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
+    if (serverInfo.headers['Origin']) headers['Origin'] = serverInfo.headers['Origin'];
+
+    const response = await axios.get(serverInfo.url, { headers, timeout: 15000 });
     let m3u8 = response.data;
     const baseUrl = serverInfo.url.substring(0, serverInfo.url.lastIndexOf('/') + 1);
     const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
     const swapVal = swapKey ? serverInfo.swap[swapKey] : null;
 
-    m3u8 = m3u8.replace(/^(?!#)(.*)$/gm, (line) => {
+    m3u8 = m3u8.replace(/\r\n/g, '\n').replace(/^([^#\s]+)/gm, (line) => {
         let url = line.trim();
-        if (!url || url.startsWith('#')) return line;
-        if (!url.startsWith('http')) url = baseUrl + url;
+        if (!url) return line;
+        
+        if (!url.startsWith('http')) {
+            if (url.startsWith('/')) {
+                const urlObj = new URL(serverInfo.url);
+                url = urlObj.origin + url;
+            } else {
+                url = baseUrl + url;
+            }
+        }
+        
         if (swapKey && url.includes(swapKey)) url = url.replace(swapKey, swapVal);
         return url;
     });
@@ -534,6 +549,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let isPlaying = true;
         let autoSwitchEnabled = true; 
         let serversTested = 0; 
+        let networkRetries = 0; // عداد محاولات الشبكة
 
         // نظام التجديد التلقائي للتوكن في الخلفية كل 8 دقائق
         setInterval(async () => {
@@ -695,6 +711,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             loadingOverlay.style.pointerEvents = 'none';
         }
 
+        // تحديث دالة تبديل السيرفر لتشمل استقرار Hls وتخطي السيرفرات عند استمرار أخطاء الشبكة
         function changeServer(serverIndex, isManual = false) {
             showLoading();
             currentServerIndex = parseInt(serverIndex);
@@ -711,11 +728,18 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
-                hls = new Hls(); 
+                hls = new Hls({
+                    maxLoadingDelay: 4,
+                    maxMaxBufferLength: 30,
+                    enableWorker: true,
+                    lowLatencyMode: true
+                }); 
+                
                 hls.loadSource(manifestUrl); 
                 hls.attachMedia(video);
                 
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    networkRetries = 0; // تصفير العداد عند النجاح
                     video.play().then(() => {
                         hideLoading();
                         isPlaying = true;
@@ -728,7 +752,19 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     if (data.fatal) {
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                hls.startLoad();
+                                networkRetries++;
+                                if (networkRetries > 3) {
+                                    if (autoSwitchEnabled && serversTested < totalServers) {
+                                        let nextServer = (currentServerIndex + 1) % totalServers;
+                                        changeServer(nextServer, false); 
+                                    } else {
+                                        autoSwitchEnabled = false; 
+                                        hls.destroy();
+                                        hideLoading();
+                                    }
+                                } else {
+                                    hls.startLoad(); 
+                                }
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
                                 hls.recoverMediaError();
