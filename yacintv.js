@@ -228,6 +228,80 @@ async function fetchManifest(serverInfo) {
 // ==========================================
 // المسارات (Routes)
 // ==========================================
+
+// تعريف متغيرات الكاش والطلبات النشطة الخاصة بملفات البث 
+const m3u8Cache = new Map();
+const activeRequests = new Map(); 
+
+// مدة بقاء الكاش بالملي ثانية (3 ثوانٍ مناسبة لملفات m3u8 للبث المباشر)
+const CACHE_TTL = 3000; 
+
+app.get('/ch/:id', async (req, res) => {
+    const channelId = req.params.id;
+    const now = Date.now();
+
+    // 1. فحص الكاش: إذا كان صالحاً، إرسال النتيجة فوراً دون طلب جديد
+    const cached = m3u8Cache.get(channelId);
+    if (cached && cached.expiresAt > now) {
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        return res.send(cached.data);
+    }
+
+    // 2. نظام "الطلب الواحد": إذا لم يكن هناك طلب جاري حالياً لهذا الرقم، قم بإنشائه
+    if (!activeRequests.has(channelId)) {
+        const fetchPromise = (async () => {
+            try {
+                const targetUrl = `http://orien.live/live/16304575049793/43581893985883/${channelId}.m3u8`;
+                
+                // جلب الملف 
+                const response = await axios.get(targetUrl);
+                let m3u8Data = response.data;
+
+                // تعديل مسارات أجزاء الفيديو (.ts) إلى روابط مطلقة لتعمل في مشغل الويب
+                const baseUrl = `http://orien.live/live/16304575049793/43581893985883/`;
+                m3u8Data = m3u8Data.split('\n').map(line => {
+                    const tLine = line.trim();
+                    // إضافة الرابط الأساسي لأي سطر لا يبدأ بـ # ولا بـ http
+                    if (tLine && !tLine.startsWith('#') && !tLine.startsWith('http')) {
+                        return baseUrl + tLine;
+                    }
+                    return line;
+                }).join('\n');
+
+                // حفظ النتيجة في الكاش مع وقت الانتهاء
+                m3u8Cache.set(channelId, {
+                    data: m3u8Data,
+                    expiresAt: Date.now() + CACHE_TTL
+                });
+
+                return m3u8Data;
+            } catch (error) {
+                console.error(`Error fetching channel ${channelId}:`, error.message);
+                throw error;
+            } finally {
+                // مسح الطلب من قائمة الطلبات النشطة بمجرد الانتهاء (سواء نجح أو فشل)
+                // للسماح بطلب جديد عند انتهاء صلاحية الكاش
+                activeRequests.delete(channelId);
+            }
+        })();
+
+        // تخزين الـ Promise لكي ينتظره أي مستخدم آخر يدخل في نفس اللحظة
+        activeRequests.set(channelId, fetchPromise);
+    }
+
+    // 3. انتظار النتيجة (المستخدم الأول ينشئ الطلب وينتظره، والمستخدمون الـ 999 الآخرون ينتظرون نفس النتيجة هنا)
+    try {
+        const m3u8Data = await activeRequests.get(channelId);
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); // منع تخزين الكاش في متصفح العميل
+        res.send(m3u8Data);
+    } catch (error) {
+        res.status(500).send("Error fetching stream. Source might be offline or blocked.");
+    }
+});
+
+
 app.get('/api/matches', async (req, res) => {
     try {
         const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
