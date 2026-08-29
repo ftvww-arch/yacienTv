@@ -53,7 +53,7 @@ const CONFIG = {
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
-    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
+    MAIN_WEBSITE: 'https://www.ytvplus.buzz/' // ضع دومينك الجديد هنا لاحقاً
 };
 
 process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
@@ -534,7 +534,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         <video id="video" playsinline webkit-playsinline autoplay></video>
 
         <div class="glass-bar title-bar" id="titleBar">
-            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">YTPlus.com</a>
+            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">ياسين Tv بلس</a>
             <div class="video-title" dir="rtl">${matchTitle}</div>
         </div>
         
