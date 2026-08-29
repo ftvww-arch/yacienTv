@@ -951,4 +951,3 @@ function generateOfflineUI(reasonMsg) {
 app.listen(PORT, () => {
     console.log(`🚀 Secure Monetized Player running on port ${PORT}`);
 });
-```[cite: 1]
