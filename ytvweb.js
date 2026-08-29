@@ -1,14 +1,11 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const compression = require('compression');
 const app = express();
 
 // إخفاء ترويسات السيرفر وحماية الأساسيات
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(compression()); // ضغط الاستجابات لتحسين الأداء
-
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
