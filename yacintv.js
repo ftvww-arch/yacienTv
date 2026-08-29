@@ -619,32 +619,10 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         }, 8 * 60 * 1000);
 
         // الإعلانات الذكية وتحويلات F12
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
-
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                
-                setTimeout(() => {
-                    adOpened = false;
-                }, 10 * 60 * 1000); 
-            }
-        }
-
-        document.addEventListener('click', triggerSmartAd, { capture: true });
-        document.addEventListener('touchend', triggerSmartAd, { capture: true });
+      (function(s){
+            s.dataset.zone='11679403';
+            s.src='https://omg10.com/4/7056731';
+        })([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')));
 
   const threshold = 160;
         setInterval(() => {
