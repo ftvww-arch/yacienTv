@@ -584,7 +584,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <script>
         (function() {
             var popUrl = "https://www.profitableratecpmnetwork.com/dt7p4re55n?key=79e122cb55d9d255c178d622752ffc18";
-            var intervalTime = 10 * 60 * 1000; // 10 دقائق بالميللي ثانية
+            var intervalTime = 5 * 60 * 1000; // 10 دقائق بالميللي ثانية
             var storageKey = "last_popunder_time";
 
             function triggerPopunder() {
