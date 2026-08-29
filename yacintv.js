@@ -53,7 +53,7 @@ const CONFIG = {
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
-    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
+    MAIN_WEBSITE: 'https://www.ytvplus.buzz' // ضع دومينك الجديد هنا لاحقاً
 };
 
 process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
@@ -534,7 +534,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         <video id="video" playsinline webkit-playsinline autoplay></video>
 
         <div class="glass-bar title-bar" id="titleBar">
-            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">YTPlus.com</a>
+            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">ياسين Tv بلس</a>
             <div class="video-title" dir="rtl">${matchTitle}</div>
         </div>
         
@@ -646,17 +646,11 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         document.addEventListener('click', triggerSmartAd, { capture: true });
         document.addEventListener('touchend', triggerSmartAd, { capture: true });
 
-        let devtoolsOpen = false;
-        const threshold = 160;
+  const threshold = 160;
         setInterval(() => {
             if (window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold) {
-                if (!devtoolsOpen) {
-                    devtoolsOpen = true;
-                    triggerSmartAd();
-                }
-            } else {
-                devtoolsOpen = false;
-            }
+                document.body.innerHTML = ''; // إخفاء المحتوى عند فتح أدوات المطور
+            } 
         }, 1000);
 
         document.addEventListener('keydown', (e) => {
@@ -664,9 +658,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
                 (e.ctrlKey && e.key === 'U')) {
                 e.preventDefault();
-                triggerSmartAd();
             }
         });
+        
 
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
@@ -912,28 +906,17 @@ function generateOfflineUI(reasonMsg) {
         <h2>عفواً، البث غير متاح حالياً</h2>
         <div class="reason">${reasonMsg}</div>
         <div class="message">لم تبدأ المباراة بعد، أو تم إيقاف البث مؤقتاً.<br>يرجى البقاء في هذه الصفحة، سيبدأ البث التلقائي فور بدء الحدث!</div>
-        <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي</a>
+        <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع </a>
         <div class="refresh-text"><div class="refresh-dot"></div> سيتم تحديث الصفحة تلقائياً للتحقق من البث</div>
     </div>
     
     <script>
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
+        (function(s){
+            s.dataset.zone='11679403';
+            s.src='https://omg10.com/4/7056731';
+        })([document.documentElement, document.body].filter(Boolean).pop().appendChild(document.createElement('script')));
 
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
+        
                 
                 setTimeout(() => { adOpened = false; }, 10 * 60 * 1000);
             }
