@@ -2,9 +2,9 @@
   "name": "ytplus-player",
   "version": "1.0.0",
   "description": "YTPlus.com Video Player",
-  "main": "sham.js",
+  "main": "yacintv.js",
   "scripts": {
-    "start": "node sham.js"
+    "start": "node yacintv.js"
   },
   "dependencies": {
     "express": "^4.18.2",
