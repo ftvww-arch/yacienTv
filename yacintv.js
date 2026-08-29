@@ -48,11 +48,12 @@ setInterval(() => {
 // ==========================================
 const CONFIG = {
     API_BASE_URL: 'https://sunny-appreciation-production-3d25.up.railway.app/yacintv',
+    TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
-    MAIN_WEBSITE: 'https://ytvplus.blogspot.com/' // ضع دومينك الجديد هنا لاحقاً
+    MAIN_WEBSITE: 'https://www.kirozozo.xyz/' // ضع دومينك الجديد هنا لاحقاً
 };
 
 process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
@@ -127,9 +128,24 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات المباراة وعنوانها
+// جلب معلومات المباراة أو القناة وعنوانها
 // ==========================================
 async function getMatchInfo(realChannelName) {
+    // 1. فحص إذا كان الطلب يخص قناة فضائية
+    if (realChannelName.startsWith('sat_')) {
+        const channelId = realChannelName.replace('sat_', '');
+        try {
+            const channelData = await CacheEngine.getOrFetch(`sat_channel_info_${channelId}`, async () => {
+                const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 5000 });
+                return res.data;
+            }, CONFIG.CACHE_DURATION);
+            return { isAvailable: true, title: channelData.name || `Channel ${channelId}` };
+        } catch (e) {
+            return { isAvailable: true, title: `beIN Sports ${channelId}` };
+        }
+    }
+
+    // 2. إذا لم تكن قناة فضائية، استكمل بحث المباريات الافتراضي
     try {
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -161,6 +177,21 @@ async function getMatchInfo(realChannelName) {
 // جلب السيرفرات والمانيفست
 // ==========================================
 async function fetchChannelServers(realChannelName) {
+    // 1. جلب بيانات سيرفرات القناة الفضائية
+    if (realChannelName.startsWith('sat_')) {
+        const channelId = realChannelName.replace('sat_', '');
+        const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
+        if (!res.data || !res.data.servers || res.data.servers.length === 0) throw new Error('لا توجد بيانات بالقناة');
+        
+        return res.data.servers.map((srv, i) => ({
+            name: srv.serverName || `سيرفر ${i + 1}`,
+            url: srv.url,
+            headers: srv.headers || {}, // سحب الترويسات الخاصة بكل مشغل
+            swap: null
+        }));
+    }
+
+    // 2. جلب سيرفرات المباريات كما كان سابقاً
     const channelId = `live_tv_${realChannelName}`;
     let dataArray = null;
 
@@ -191,34 +222,26 @@ async function fetchChannelServers(realChannelName) {
     return servers;
 }
 
-// تحديث الدالة لمعالجة الروابط المطلقة وإضافة ترويسات الحماية
 async function fetchManifest(serverInfo) {
-    const headers = { 
-        'User-Agent': serverInfo.headers['User-Agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': '*/*'
-    };
-    if (serverInfo.headers['Referer']) headers['Referer'] = serverInfo.headers['Referer'];
-    if (serverInfo.headers['Origin']) headers['Origin'] = serverInfo.headers['Origin'];
+    const headers = { 'User-Agent': serverInfo.headers['user-agent'] || serverInfo.headers['User-Agent'] || 'Mozilla/5.0' };
+    
+    // سحب كافة الترويسات التي أتت مع السيرفر وتمريرها في الطلب
+    if (serverInfo.headers) {
+        Object.keys(serverInfo.headers).forEach(key => {
+            headers[key] = serverInfo.headers[key];
+        });
+    }
 
-    const response = await axios.get(serverInfo.url, { headers, timeout: 15000 });
+    const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
     let m3u8 = response.data;
     const baseUrl = serverInfo.url.substring(0, serverInfo.url.lastIndexOf('/') + 1);
     const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
     const swapVal = swapKey ? serverInfo.swap[swapKey] : null;
 
-    m3u8 = m3u8.replace(/\r\n/g, '\n').replace(/^([^#\s]+)/gm, (line) => {
+    m3u8 = m3u8.replace(/^(?!#)(.*)$/gm, (line) => {
         let url = line.trim();
-        if (!url) return line;
-        
-        if (!url.startsWith('http')) {
-            if (url.startsWith('/')) {
-                const urlObj = new URL(serverInfo.url);
-                url = urlObj.origin + url;
-            } else {
-                url = baseUrl + url;
-            }
-        }
-        
+        if (!url || url.startsWith('#')) return line;
+        if (!url.startsWith('http')) url = baseUrl + url;
         if (swapKey && url.includes(swapKey)) url = url.replace(swapKey, swapVal);
         return url;
     });
@@ -228,80 +251,6 @@ async function fetchManifest(serverInfo) {
 // ==========================================
 // المسارات (Routes)
 // ==========================================
-
-// تعريف متغيرات الكاش والطلبات النشطة الخاصة بملفات البث 
-const m3u8Cache = new Map();
-const activeRequests = new Map(); 
-
-// مدة بقاء الكاش بالملي ثانية (3 ثوانٍ مناسبة لملفات m3u8 للبث المباشر)
-const CACHE_TTL = 3000; 
-
-app.get('/ch/:id', async (req, res) => {
-    const channelId = req.params.id;
-    const now = Date.now();
-
-    // 1. فحص الكاش: إذا كان صالحاً، إرسال النتيجة فوراً دون طلب جديد
-    const cached = m3u8Cache.get(channelId);
-    if (cached && cached.expiresAt > now) {
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        return res.send(cached.data);
-    }
-
-    // 2. نظام "الطلب الواحد": إذا لم يكن هناك طلب جاري حالياً لهذا الرقم، قم بإنشائه
-    if (!activeRequests.has(channelId)) {
-        const fetchPromise = (async () => {
-            try {
-                const targetUrl = `http://orien.live/live/16304575049793/43581893985883/${channelId}.m3u8`;
-                
-                // جلب الملف 
-                const response = await axios.get(targetUrl);
-                let m3u8Data = response.data;
-
-                // تعديل مسارات أجزاء الفيديو (.ts) إلى روابط مطلقة لتعمل في مشغل الويب
-                const baseUrl = `http://orien.live/live/16304575049793/43581893985883/`;
-                m3u8Data = m3u8Data.split('\n').map(line => {
-                    const tLine = line.trim();
-                    // إضافة الرابط الأساسي لأي سطر لا يبدأ بـ # ولا بـ http
-                    if (tLine && !tLine.startsWith('#') && !tLine.startsWith('http')) {
-                        return baseUrl + tLine;
-                    }
-                    return line;
-                }).join('\n');
-
-                // حفظ النتيجة في الكاش مع وقت الانتهاء
-                m3u8Cache.set(channelId, {
-                    data: m3u8Data,
-                    expiresAt: Date.now() + CACHE_TTL
-                });
-
-                return m3u8Data;
-            } catch (error) {
-                console.error(`Error fetching channel ${channelId}:`, error.message);
-                throw error;
-            } finally {
-                // مسح الطلب من قائمة الطلبات النشطة بمجرد الانتهاء (سواء نجح أو فشل)
-                // للسماح بطلب جديد عند انتهاء صلاحية الكاش
-                activeRequests.delete(channelId);
-            }
-        })();
-
-        // تخزين الـ Promise لكي ينتظره أي مستخدم آخر يدخل في نفس اللحظة
-        activeRequests.set(channelId, fetchPromise);
-    }
-
-    // 3. انتظار النتيجة (المستخدم الأول ينشئ الطلب وينتظره، والمستخدمون الـ 999 الآخرون ينتظرون نفس النتيجة هنا)
-    try {
-        const m3u8Data = await activeRequests.get(channelId);
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); // منع تخزين الكاش في متصفح العميل
-        res.send(m3u8Data);
-    } catch (error) {
-        res.status(500).send("Error fetching stream. Source might be offline or blocked.");
-    }
-});
-
-
 app.get('/api/matches', async (req, res) => {
     try {
         const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -322,6 +271,31 @@ app.get('/api/matches', async (req, res) => {
         res.json(formattedMatches);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch matches' });
+    }
+});
+
+// المسار الجديد لعرض القنوات الفضائية وروابط تشفيرها
+app.get('/api/channels', async (req, res) => {
+    try {
+        const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
+            const response = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
+            return response.data;
+        }, 60000);
+
+        const hostUrl = `${req.protocol}://${req.get('host')}`;
+        
+        // إعادة صياغة الرد ليكون متوافقاً ويقدم رابط تشغيل مباشر لكل قناة
+        const formattedChannels = channels.map(ch => ({
+            id: ch.id,
+            name: ch.name,
+            URl: `${hostUrl}/play/${encodeId(`sat_${ch.id}`)}`
+        }));
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.json(formattedChannels);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch TV channels' });
     }
 });
 
@@ -560,7 +534,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         <video id="video" playsinline webkit-playsinline autoplay></video>
 
         <div class="glass-bar title-bar" id="titleBar">
-            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">ياسين Tv بلس </a>
+            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">YTPlus.com</a>
             <div class="video-title" dir="rtl">${matchTitle}</div>
         </div>
         
@@ -623,7 +597,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let isPlaying = true;
         let autoSwitchEnabled = true; 
         let serversTested = 0; 
-        let networkRetries = 0; // عداد محاولات الشبكة
 
         // نظام التجديد التلقائي للتوكن في الخلفية كل 8 دقائق
         setInterval(async () => {
@@ -785,7 +758,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             loadingOverlay.style.pointerEvents = 'none';
         }
 
-        // تحديث دالة تبديل السيرفر لتشمل استقرار Hls وتخطي السيرفرات عند استمرار أخطاء الشبكة
         function changeServer(serverIndex, isManual = false) {
             showLoading();
             currentServerIndex = parseInt(serverIndex);
@@ -802,18 +774,11 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
-                hls = new Hls({
-                    maxLoadingDelay: 4,
-                    maxMaxBufferLength: 30,
-                    enableWorker: true,
-                    lowLatencyMode: true
-                }); 
-                
+                hls = new Hls(); 
                 hls.loadSource(manifestUrl); 
                 hls.attachMedia(video);
                 
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    networkRetries = 0; // تصفير العداد عند النجاح
                     video.play().then(() => {
                         hideLoading();
                         isPlaying = true;
@@ -826,19 +791,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     if (data.fatal) {
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                networkRetries++;
-                                if (networkRetries > 3) {
-                                    if (autoSwitchEnabled && serversTested < totalServers) {
-                                        let nextServer = (currentServerIndex + 1) % totalServers;
-                                        changeServer(nextServer, false); 
-                                    } else {
-                                        autoSwitchEnabled = false; 
-                                        hls.destroy();
-                                        hideLoading();
-                                    }
-                                } else {
-                                    hls.startLoad(); 
-                                }
+                                hls.startLoad();
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
                                 hls.recoverMediaError();
@@ -998,3 +951,4 @@ function generateOfflineUI(reasonMsg) {
 app.listen(PORT, () => {
     console.log(`🚀 Secure Monetized Player running on port ${PORT}`);
 });
+```[cite: 1]
