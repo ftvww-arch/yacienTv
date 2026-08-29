@@ -582,6 +582,53 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     </div>
 
     <script>
+        (function() {
+            var popUrl = "https://www.profitableratecpmnetwork.com/dt7p4re55n?key=79e122cb55d9d255c178d622752ffc18";
+            var intervalTime = 10 * 60 * 1000; // 10 دقائق بالميللي ثانية
+            var storageKey = "last_popunder_time";
+
+            function triggerPopunder() {
+                var currentTime = new Date().getTime();
+                var lastTime = localStorage.getItem(storageKey);
+
+                if (!lastTime || (currentTime - lastTime > intervalTime)) {
+                    localStorage.setItem(storageKey, currentTime);
+                    
+                    // محاولة فتح الرابط كـ Popunder خلف نافذة المستخدم الحالية
+                    var win = window.open(popUrl, '_blank');
+                    if (win) {
+                        win.blur();
+                        window.focus();
+                    }
+                }
+            }
+
+            // الاستماع لأول تفاعل للمستخدم مع الصفحة لضمان عمل النافذة وتجاوز حظر المتصفحات (Pop-up Blocker)
+            var events = ['click', 'keydown', 'scroll', 'touchstart'];
+            function handleUserInteraction() {
+                triggerPopunder();
+                events.forEach(function(event) {
+                    window.removeEventListener(event, handleUserInteraction);
+                });
+            }
+
+            events.forEach(function(event) {
+                window.addEventListener(event, handleUserInteraction, { once: true });
+            });
+
+            // مؤقت إضافي للمحاولة إذا ظل المستخدم في الصفحة طوال الـ 10 دقائق
+            setInterval(function() {
+                var currentTime = new Date().getTime();
+                var lastTime = localStorage.getItem(storageKey);
+                if (!lastTime || (currentTime - lastTime > intervalTime)) {
+                    localStorage.setItem(storageKey, currentTime);
+                    window.open(popUrl, '_blank');
+                }
+            }, intervalTime);
+        })();
+    </script>
+
+    <script>
         const video = document.getElementById('video');
         const playerContainer = document.getElementById('playerContainer');
         const loadingOverlay = document.getElementById('loadingOverlay');
@@ -617,56 +664,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 console.error("فشل تجديد التوكن");
             }
         }, 8 * 60 * 1000);
-
-        // الإعلانات الذكية وتحويلات F12
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
-
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                
-                setTimeout(() => {
-                    adOpened = false;
-                }, 10 * 60 * 1000); 
-            }
-        }
-
-        document.addEventListener('click', triggerSmartAd, { capture: true });
-        document.addEventListener('touchend', triggerSmartAd, { capture: true });
-
-        let devtoolsOpen = false;
-        const threshold = 160;
-        setInterval(() => {
-            if (window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold) {
-                if (!devtoolsOpen) {
-                    devtoolsOpen = true;
-                    triggerSmartAd();
-                }
-            } else {
-                devtoolsOpen = false;
-            }
-        }, 1000);
-
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'F12' || 
-                (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'C' || e.key === 'J')) || 
-                (e.ctrlKey && e.key === 'U')) {
-                e.preventDefault();
-                triggerSmartAd();
-            }
-        });
 
         const playPauseBtn = document.getElementById('playPauseBtn');
         const pauseIcon = document.getElementById('pauseIcon');
@@ -917,31 +914,53 @@ function generateOfflineUI(reasonMsg) {
     </div>
     
     <script>
-        const smartLinks = [
-            'https://omg10.com/4/7056731',
-            'https://omg10.com/4/7056731'
-        ];
-        let adOpened = false;
+        (function() {
+            var popUrl = "https://www.profitableratecpmnetwork.com/dt7p4re55n?key=79e122cb55d9d255c178d622752ffc18";
+            var intervalTime = 10 * 60 * 1000; // 10 دقائق بالميللي ثانية
+            var storageKey = "last_popunder_time";
 
-        function triggerSmartAd() {
-            if (!adOpened) {
-                adOpened = true;
-                const randomUrl = smartLinks[Math.floor(Math.random() * smartLinks.length)];
-                const anchor = document.createElement('a');
-                anchor.href = randomUrl;
-                anchor.target = '_blank';
-                anchor.rel = 'noopener noreferrer';
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                
-                setTimeout(() => { adOpened = false; }, 10 * 60 * 1000);
+            function triggerPopunder() {
+                var currentTime = new Date().getTime();
+                var lastTime = localStorage.getItem(storageKey);
+
+                if (!lastTime || (currentTime - lastTime > intervalTime)) {
+                    localStorage.setItem(storageKey, currentTime);
+                    
+                    // محاولة فتح الرابط كـ Popunder خلف نافذة المستخدم الحالية
+                    var win = window.open(popUrl, '_blank');
+                    if (win) {
+                        win.blur();
+                        window.focus();
+                    }
+                }
             }
-        }
-        
-        document.addEventListener('click', triggerSmartAd, { capture: true });
-        document.addEventListener('touchend', triggerSmartAd, { capture: true });
-        
+
+            // الاستماع لأول تفاعل للمستخدم مع الصفحة لضمان عمل النافذة وتجاوز حظر المتصفحات (Pop-up Blocker)
+            var events = ['click', 'keydown', 'scroll', 'touchstart'];
+            function handleUserInteraction() {
+                triggerPopunder();
+                events.forEach(function(event) {
+                    window.removeEventListener(event, handleUserInteraction);
+                });
+            }
+
+            events.forEach(function(event) {
+                window.addEventListener(event, handleUserInteraction, { once: true });
+            });
+
+            // مؤقت إضافي للمحاولة إذا ظل المستخدم في الصفحة طوال الـ 10 دقائق
+            setInterval(function() {
+                var currentTime = new Date().getTime();
+                var lastTime = localStorage.getItem(storageKey);
+                if (!lastTime || (currentTime - lastTime > intervalTime)) {
+                    localStorage.setItem(storageKey, currentTime);
+                    window.open(popUrl, '_blank');
+                }
+            }, intervalTime);
+        })();
+    </script>
+
+    <script>
         setTimeout(() => { location.reload(); }, 60 * 1000);
     </script>
 </body>
