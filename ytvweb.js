@@ -37,7 +37,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// تنظيف دوري للذاكرة المؤقتة للـ Rate Limiter (محسن)
 setInterval(() => {
     const now = Date.now();
     for (const [ip, data] of requestCounts.entries()) {
@@ -56,10 +55,9 @@ const CONFIG = {
     SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
     TOKEN_EXPIRY: 10 * 60 * 1000,
     MAIN_WEBSITE: 'https://www.kirozozo.xyz/',
-    // إعدادات محسنة للأداء
     REQUEST_TIMEOUT: 8000,
     MAX_CACHE_ITEMS: 500,
-    CLEANUP_INTERVAL: 60 * 1000 // تنظيف كل دقيقة
+    CLEANUP_INTERVAL: 60 * 1000
 };
 
 process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
@@ -95,20 +93,18 @@ function encodeId(text) { return Buffer.from(text).toString('hex'); }
 function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
 
 // ==========================================
-// محرك الكاش (Cache Engine) - محسن
+// محرك الكاش (Cache Engine) 
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
     inFlight: new Map(),
     
     async getOrFetch(key, fetcher, ttl) {
-        // تحقق سريع من الكاش
         const cached = this.memory.get(key);
         if (cached && cached.expiresAt > Date.now()) {
             return cached.data;
         }
         
-        // منع الطلبات المتكررة لنفس المورد
         if (this.inFlight.has(key)) {
             return new Promise((resolve, reject) => {
                 this.inFlight.get(key).push({ resolve, reject });
@@ -119,23 +115,19 @@ const CacheEngine = {
         try {
             const data = await fetcher();
             
-            // إدارة حجم الكاش
             if (this.memory.size >= CONFIG.MAX_CACHE_ITEMS) {
-                // حذف أقدم عنصر
                 const firstKey = this.memory.keys().next().value;
                 this.memory.delete(firstKey);
             }
             
             this.memory.set(key, { data, expiresAt: Date.now() + ttl });
             
-            // حل جميع المنتظرين
             const waiters = this.inFlight.get(key);
             this.inFlight.delete(key);
             waiters.forEach(w => w.resolve(data));
             
             return data;
         } catch (error) {
-            // رفض جميع المنتظرين عند الخطأ
             const waiters = this.inFlight.get(key);
             this.inFlight.delete(key);
             waiters.forEach(w => w.reject(error));
@@ -143,7 +135,6 @@ const CacheEngine = {
         }
     },
     
-    // تنظيف الكاش بشكل دوري
     cleanup() {
         const now = Date.now();
         for (const [key, value] of this.memory.entries()) {
@@ -154,14 +145,12 @@ const CacheEngine = {
     }
 };
 
-// تنظيف الكاش بشكل دوري
 setInterval(() => CacheEngine.cleanup(), CONFIG.CLEANUP_INTERVAL);
 
 // ==========================================
 // جلب معلومات المباراة أو القناة وعنوانها
 // ==========================================
 async function getMatchInfo(realChannelName) {
-    // 1. فحص إذا كان الطلب يخص قناة فضائية
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         try {
@@ -177,7 +166,6 @@ async function getMatchInfo(realChannelName) {
         }
     }
 
-    // 2. إذا لم تكن قناة فضائية، استكمل بحث المباريات الافتراضي
     try {
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { 
@@ -211,7 +199,6 @@ async function getMatchInfo(realChannelName) {
 // جلب السيرفرات والمانيفست
 // ==========================================
 async function fetchChannelServers(realChannelName) {
-    // 1. جلب بيانات سيرفرات القناة الفضائية
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { 
@@ -227,7 +214,6 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
-    // 2. جلب سيرفرات المباريات كما كان سابقاً
     const channelId = `live_tv_${realChannelName}`;
     let dataArray = null;
 
@@ -240,9 +226,7 @@ async function fetchChannelServers(realChannelName) {
         if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) {
             dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
         }
-    } catch (e) {
-        // تجاهل الخطأ والمتابعة للمحاولة الثانية
-    }
+    } catch (e) {}
 
     if (!dataArray || dataArray.length === 0) {
         try {
@@ -251,9 +235,7 @@ async function fetchChannelServers(realChannelName) {
                 timeout: CONFIG.REQUEST_TIMEOUT 
             });
             if (response2.data) dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
-        } catch (e) {
-            // تجاهل الخطأ
-        }
+        } catch (e) {}
     }
 
     if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات');
@@ -272,9 +254,7 @@ async function fetchChannelServers(realChannelName) {
                 headers: innerData.headers || {}, 
                 swap: innerData.swap || null 
             });
-        } catch (e) {
-            // تجاهل الأخطاء في تحليل البيانات
-        }
+        } catch (e) {}
     });
     
     if (servers.length === 0) throw new Error('لا توجد سيرفرات');
@@ -286,7 +266,6 @@ async function fetchManifest(serverInfo) {
         'User-Agent': serverInfo.headers['user-agent'] || serverInfo.headers['User-Agent'] || 'Mozilla/5.0' 
     };
     
-    // سحب كافة الترويسات التي أتت مع السيرفر وتمريرها في الطلب
     if (serverInfo.headers) {
         Object.keys(serverInfo.headers).forEach(key => {
             headers[key] = serverInfo.headers[key];
@@ -342,7 +321,6 @@ app.get('/api/matches', async (req, res) => {
     }
 });
 
-// المسار الجديد لعرض القنوات الفضائية وروابط تشفيرها
 app.get('/api/channels', async (req, res) => {
     try {
         const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
@@ -370,7 +348,6 @@ app.get('/api/channels', async (req, res) => {
 
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
-// مسار تجديد التوكن في الخلفية دون قطع البث أو إعادة التحميل
 app.get('/api/refresh-token', (req, res) => {
     const userIp = getClientIp(req);
     const newToken = generateSecureToken(userIp);
@@ -394,6 +371,17 @@ app.get('/play/:hash', async (req, res) => {
             CONFIG.CACHE_DURATION
         );
         
+        // --- إضافة جديدة: تسخين الكاش (Cache Pre-warming) للرابط الأول ---
+        // هذا سيمنع أي تأخير عن الشخص الأول الذي يقوم بفتح المشغل
+        if (servers && servers.length > 0) {
+            const cacheKey = `manifest_${realChannel}_0`;
+            CacheEngine.getOrFetch(
+                cacheKey, 
+                () => fetchManifest(servers[0]), 
+                CONFIG.MANIFEST_CACHE
+            ).catch(() => {}); // تجاهل أي خطأ هنا حتى لا يتعطل الرد الأساسي
+        }
+        
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `${req.protocol}://${req.get('host')}`;
@@ -411,7 +399,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        // حظر شامل لبرامج الفحص والبوتات والسكربتات
         const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer', 'bot', 'crawler', 'spider', 'googlebot', 'bingbot'];
         if (blockedAgents.some(agent => userAgent.includes(agent))) return res.status(403).send('Access Denied');
         if (!referer.includes(host) && !referer.includes(mainHost)) return res.status(403).send('Access Denied');
@@ -442,12 +429,13 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
-        res.status(500).send('Manifest Error');
+        // بدلاً من السقوط، نرسل خطأ مفهوم للعميل لكي يقوم بتغيير السيرفر أو عرض الشاشة المخصصة
+        res.status(404).send('Manifest not ready or stream unavailable');
     }
 });
 
 // ==========================================
-// الواجهة الديناميكية النهائية (المشغل مع التجديد الذاتي للتوكن)
+// الواجهة الديناميكية النهائية (المشغل)
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -471,6 +459,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>${matchTitle}</title>
+    <script src="https://pl31177179.profitableratecpmnetwork.com/5c/00/0c/5c000c9ae2f77f6a72a8b3b742da67e9.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
@@ -611,8 +600,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
     <div class="player-container" id="playerContainer">
         <div id="loadingOverlay" class="loading-overlay">
-            <div class="spinner"></div>
-            <div class="loading-text">جاري التحقق من البث المباشر...</div>
+            <div class="spinner" id="loadingSpinner"></div>
+            <div class="loading-text" id="loadingText">جاري التحقق من البث المباشر...</div>
         </div>
 
         <video id="video" playsinline webkit-playsinline autoplay></video>
@@ -669,10 +658,11 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         const video = document.getElementById('video');
         const playerContainer = document.getElementById('playerContainer');
         const loadingOverlay = document.getElementById('loadingOverlay');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const loadingText = document.getElementById('loadingText');
         const titleBar = document.getElementById('titleBar');
         let hls = null;
         
-        // المتغيرات للتوكن وتجديدها ديناميكياً
         let currentToken = '${secureToken}';
         const channelHash = '${channelHash}';
         const totalServers = ${totalServers};
@@ -682,73 +672,24 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let autoSwitchEnabled = true; 
         let serversTested = 0; 
 
-        // نظام التجديد التلقائي للتوكن في الخلفية كل 8 دقائق
         setInterval(async () => {
             try {
                 const response = await fetch('/api/refresh-token');
                 const data = await response.json();
                 if (data && data.token) {
                     currentToken = data.token;
-                    console.log("تم تجديد التوكن بنجاح في الخلفية");
-                    
-                    // تحديث الرابط للمشغل بشكل صامت ودون أي انقطاع
                     if (hls) {
                         const newManifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
                         hls.loadSource(newManifestUrl);
                     }
                 }
-            } catch (e) {
-                console.error("فشل تجديد التوكن");
-            }
+            } catch (e) {}
         }, 8 * 60 * 1000);
-
-        // كود Popunder الجديد
-        (function() {
-            var popUrl = "https://www.profitableratecpmnetwork.com/dt7p4re55n?key=79e122cb55d9d255c178d622752ffc18";
-            var intervalTime = 10 * 60 * 1000; // 10 دقائق بالميللي ثانية
-            var storageKey = "last_popunder_time";
-
-            function triggerPopunder() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    
-                    var win = window.open(popUrl, '_blank');
-                    if (win) {
-                        win.blur();
-                        window.focus();
-                    }
-                }
-            }
-
-            var events = ['click', 'keydown', 'scroll', 'touchstart'];
-            function handleUserInteraction() {
-                triggerPopunder();
-                events.forEach(function(event) {
-                    window.removeEventListener(event, handleUserInteraction);
-                });
-            }
-
-            events.forEach(function(event) {
-                window.addEventListener(event, handleUserInteraction, { once: true });
-            });
-
-            setInterval(function() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    window.open(popUrl, '_blank');
-                }
-            }, intervalTime);
-        })();
 
         const threshold = 160;
         setInterval(() => {
             if (window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold) {
-                document.body.innerHTML = ''; // إخفاء المحتوى عند فتح أدوات المطور
+                document.body.innerHTML = ''; 
             } 
         }, 1000);
 
@@ -842,12 +783,29 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         });
 
         function showLoading() {
+            loadingSpinner.style.display = 'block';
+            loadingText.innerHTML = 'جاري التحقق من البث المباشر...';
             loadingOverlay.style.opacity = '1';
             loadingOverlay.style.pointerEvents = 'auto';
         }
+        
         function hideLoading() {
             loadingOverlay.style.opacity = '0';
             loadingOverlay.style.pointerEvents = 'none';
+        }
+
+        // --- دالة جديدة ذكية لإدارة فشل السيرفرات دون إزعاج المستخدم ---
+        function handleStreamError() {
+            if (hls) hls.destroy();
+            loadingSpinner.style.display = 'none';
+            loadingText.innerHTML = '<div style="color:#f59e0b; font-size:35px; margin-bottom:10px;">⚠️</div>البث غير متوفر حالياً أو قيد التجهيز<br><span style="font-size:12px; color:#9ca3af; margin-top:8px; display:block;">سيتم التحديث تلقائياً بعد قليل...</span>';
+            loadingOverlay.style.opacity = '1';
+            loadingOverlay.style.pointerEvents = 'auto';
+            
+            // تحديث الصفحة تلقائياً بعد 5 ثوانٍ، قد يكون السيرفر انتهى من التجهيز (الكاش)
+            setTimeout(() => {
+                window.location.reload();
+            }, 5000);
         }
 
         function changeServer(serverIndex, isManual = false) {
@@ -883,7 +841,17 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     if (data.fatal) {
                         switch (data.type) {
                             case Hls.ErrorTypes.NETWORK_ERROR:
-                                hls.startLoad();
+                                // إذا كان الاستجابة خطأ مثل 404 أو 500
+                                if (data.response && data.response.code >= 400) {
+                                    if (autoSwitchEnabled && serversTested < totalServers) {
+                                        let nextServer = (currentServerIndex + 1) % totalServers;
+                                        changeServer(nextServer, false); 
+                                    } else {
+                                        handleStreamError(); // عرض رسالة الخطأ الذكية
+                                    }
+                                } else {
+                                    hls.startLoad();
+                                }
                                 break;
                             case Hls.ErrorTypes.MEDIA_ERROR:
                                 hls.recoverMediaError();
@@ -893,9 +861,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                                     let nextServer = (currentServerIndex + 1) % totalServers;
                                     changeServer(nextServer, false); 
                                 } else {
-                                    autoSwitchEnabled = false; 
-                                    hls.destroy();
-                                    hideLoading();
+                                    handleStreamError(); // عرض رسالة الخطأ الذكية
                                 }
                                 break;
                         }
@@ -910,6 +876,16 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                         updatePlayPauseUI();
                         autoSwitchEnabled = false;
                     }).catch(() => { hideLoading(); });
+                });
+                
+                // في حالة فشل المشغل الافتراضي (مثل Safari)
+                video.addEventListener('error', () => {
+                    if (autoSwitchEnabled && serversTested < totalServers) {
+                        let nextServer = (currentServerIndex + 1) % totalServers;
+                        changeServer(nextServer, false); 
+                    } else {
+                        handleStreamError();
+                    }
                 });
             }
             serverPopup.style.display = 'none';
@@ -961,6 +937,7 @@ function generateOfflineUI(reasonMsg) {
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>البث غير متوفر</title>
+    <script src="https://pl31177179.profitableratecpmnetwork.com/5c/00/0c/5c000c9ae2f77f6a72a8b3b742da67e9.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
         body { 
@@ -1009,49 +986,6 @@ function generateOfflineUI(reasonMsg) {
     </div>
     
     <script>
-        // كود Popunder الجديد
-        (function() {
-            var popUrl = "https://www.profitableratecpmnetwork.com/dt7p4re55n?key=79e122cb55d9d255c178d622752ffc18";
-            var intervalTime = 10 * 60 * 1000; // 10 دقائق بالميللي ثانية
-            var storageKey = "last_popunder_time";
-
-            function triggerPopunder() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    
-                    var win = window.open(popUrl, '_blank');
-                    if (win) {
-                        win.blur();
-                        window.focus();
-                    }
-                }
-            }
-
-            var events = ['click', 'keydown', 'scroll', 'touchstart'];
-            function handleUserInteraction() {
-                triggerPopunder();
-                events.forEach(function(event) {
-                    window.removeEventListener(event, handleUserInteraction);
-                });
-            }
-
-            events.forEach(function(event) {
-                window.addEventListener(event, handleUserInteraction, { once: true });
-            });
-
-            setInterval(function() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    window.open(popUrl, '_blank');
-                }
-            }, intervalTime);
-        })();
-
         setTimeout(() => { location.reload(); }, 60 * 1000);
     </script>
 </body>
