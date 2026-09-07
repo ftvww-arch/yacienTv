@@ -177,6 +177,18 @@ async function getMatchInfo(realChannelName) {
 // جلب السيرفرات والمانيفست
 // ==========================================
 async function fetchChannelServers(realChannelName) {
+    // --- دعم الروابط المباشرة ---
+    if (realChannelName.startsWith('direct_')) {
+        const url = realChannelName.replace('direct_', '');
+        return [{
+            name: 'سيرفر مباشر',
+            url: url,
+            headers: { 'User-Agent': 'Mozilla/5.0' }, // ترويسة افتراضية لمنع الحظر
+            swap: null
+        }];
+    }
+    // ----------------------------
+
     // 1. جلب بيانات سيرفرات القناة الفضائية
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
@@ -308,6 +320,34 @@ app.get('/api/refresh-token', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.json({ token: newToken });
+});
+
+// مسار تشغيل الروابط المباشرة مع الحفاظ على الاستعلامات (مثل ?token=...)
+app.get('/m/*', async (req, res) => {
+    try {
+        // استخراج الرابط بالكامل كما هو من المسار الأصلي لتجنب ضياع التوكن 
+        const prefix = '/m/';
+        const streamUrl = req.originalUrl.substring(req.originalUrl.indexOf(prefix) + prefix.length);
+
+        if (!streamUrl || !streamUrl.startsWith('http')) {
+            return res.send(generateOfflineUI('رابط البث غير صالح'));
+        }
+
+        // إنشاء هاش مميز يبدأ بـ direct_ لربط الرابط بنظام الكاش والمانيفست الحالي
+        const channelHash = encodeId('direct_' + streamUrl);
+        
+        const userIp = getClientIp(req);
+        const secureToken = generateSecureToken(userIp);
+        const hostUrl = `${req.protocol}://${req.get('host')}`;
+        
+        // واجهة وهمية لسيرفر واحد لكي يفهمها المشغل
+        const servers = [{ name: 'سيرفر مباشر', url: streamUrl, headers: {} }];
+        
+        // توليد نفس واجهة المشغل (Player UI)
+        res.send(generateUI(channelHash, servers, secureToken, 'بث مباشر خاص', hostUrl)); 
+    } catch (error) {
+        res.send(generateOfflineUI('حدث خطأ في معالجة الرابط المباشر'));
+    }
 });
 
 app.get('/play/:hash', async (req, res) => {
