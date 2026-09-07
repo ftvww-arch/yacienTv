@@ -48,7 +48,7 @@ setInterval(() => {
 // الإعدادات العامة 
 // ==========================================
 const CONFIG = {
-    API_BASE_URL: 'https://sunny-appreciation-production-3d25.up.railway.app/yacintv',
+    API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
     TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
