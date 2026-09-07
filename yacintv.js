@@ -322,6 +322,57 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
+
+
+
+
+// مسار مخصص للتطبيقات (مثل ExoPlayer) لجلب المانيفست مباشرة
+app.get('/app-stream/*', async (req, res) => {
+    try {
+        // استخراج الرابط الأصلي بالكامل مع التوكن الخاص به
+        const prefix = '/app-stream/';
+        const streamUrl = req.originalUrl.substring(req.originalUrl.indexOf(prefix) + prefix.length);
+
+        if (!streamUrl || !streamUrl.startsWith('http')) {
+            return res.status(400).send('رابط البث غير صالح');
+        }
+
+        // [اختياري ولكن مهم] حماية المسار بمفتاح سري خاص بتطبيقك لمنع سرقة البث
+        // يجب أن تضيف ?app_key=fadi_app_2026 في نهاية الرابط داخل تطبيقك
+        const appKey = req.query.app_key;
+        if (appKey !== 'fadi_app_2026') { 
+            return res.status(403).send('Access Denied');
+        }
+
+        const cacheKey = `app_manifest_${encodeId(streamUrl)}`;
+        
+        // تجهيز معلومات السيرفر للطلب
+        const serverInfo = {
+            url: streamUrl,
+            headers: { 'User-Agent': 'Mozilla/5.0' }, // التخفي كمتصفح لتجاوز حماية السيرفر الأصلي
+            swap: null
+        };
+
+        // جلب المانيفست وتطبيق الكاش (1000 مستخدم = طلب واحد للسيرفر الأصلي)
+        const manifestData = await CacheEngine.getOrFetch(
+            cacheKey, 
+            () => fetchManifest(serverInfo), 
+            CONFIG.MANIFEST_CACHE
+        );
+
+        // إرجاع الملف كصيغة فيديو قياسية ليفهمها مشغل التطبيق
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.send(manifestData);
+
+    } catch (error) {
+        res.status(500).send('تعذر جلب البث');
+    }
+});
+
+
+
 // مسار تشغيل الروابط المباشرة مع الحفاظ على الاستعلامات (مثل ?token=...)
 app.get('/m/*', async (req, res) => {
     try {
