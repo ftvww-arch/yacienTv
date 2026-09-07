@@ -177,18 +177,6 @@ async function getMatchInfo(realChannelName) {
 // جلب السيرفرات والمانيفست
 // ==========================================
 async function fetchChannelServers(realChannelName) {
-    // --- دعم الروابط المباشرة ---
-    if (realChannelName.startsWith('direct_')) {
-        const url = realChannelName.replace('direct_', '');
-        return [{
-            name: 'سيرفر مباشر',
-            url: url,
-            headers: { 'User-Agent': 'Mozilla/5.0' }, // ترويسة افتراضية لمنع الحظر
-            swap: null
-        }];
-    }
-    // ----------------------------
-
     // 1. جلب بيانات سيرفرات القناة الفضائية
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
@@ -320,85 +308,6 @@ app.get('/api/refresh-token', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.json({ token: newToken });
-});
-
-
-
-
-
-// مسار مخصص للتطبيقات (مثل ExoPlayer) لجلب المانيفست مباشرة
-app.get('/app-stream/*', async (req, res) => {
-    try {
-        // استخراج الرابط الأصلي بالكامل مع التوكن الخاص به
-        const prefix = '/app-stream/';
-        const streamUrl = req.originalUrl.substring(req.originalUrl.indexOf(prefix) + prefix.length);
-
-        if (!streamUrl || !streamUrl.startsWith('http')) {
-            return res.status(400).send('رابط البث غير صالح');
-        }
-
-        // [اختياري ولكن مهم] حماية المسار بمفتاح سري خاص بتطبيقك لمنع سرقة البث
-        // يجب أن تضيف ?app_key=fadi_app_2026 في نهاية الرابط داخل تطبيقك
-        const appKey = req.query.app_key;
-        if (appKey !== 'fadi_app_2026') { 
-            return res.status(403).send('Access Denied');
-        }
-
-        const cacheKey = `app_manifest_${encodeId(streamUrl)}`;
-        
-        // تجهيز معلومات السيرفر للطلب
-        const serverInfo = {
-            url: streamUrl,
-            headers: { 'User-Agent': 'Mozilla/5.0' }, // التخفي كمتصفح لتجاوز حماية السيرفر الأصلي
-            swap: null
-        };
-
-        // جلب المانيفست وتطبيق الكاش (1000 مستخدم = طلب واحد للسيرفر الأصلي)
-        const manifestData = await CacheEngine.getOrFetch(
-            cacheKey, 
-            () => fetchManifest(serverInfo), 
-            CONFIG.MANIFEST_CACHE
-        );
-
-        // إرجاع الملف كصيغة فيديو قياسية ليفهمها مشغل التطبيق
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.send(manifestData);
-
-    } catch (error) {
-        res.status(500).send('تعذر جلب البث');
-    }
-});
-
-
-
-// مسار تشغيل الروابط المباشرة مع الحفاظ على الاستعلامات (مثل ?token=...)
-app.get('/m/*', async (req, res) => {
-    try {
-        // استخراج الرابط بالكامل كما هو من المسار الأصلي لتجنب ضياع التوكن 
-        const prefix = '/m/';
-        const streamUrl = req.originalUrl.substring(req.originalUrl.indexOf(prefix) + prefix.length);
-
-        if (!streamUrl || !streamUrl.startsWith('http')) {
-            return res.send(generateOfflineUI('رابط البث غير صالح'));
-        }
-
-        // إنشاء هاش مميز يبدأ بـ direct_ لربط الرابط بنظام الكاش والمانيفست الحالي
-        const channelHash = encodeId('direct_' + streamUrl);
-        
-        const userIp = getClientIp(req);
-        const secureToken = generateSecureToken(userIp);
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-        
-        // واجهة وهمية لسيرفر واحد لكي يفهمها المشغل
-        const servers = [{ name: 'سيرفر مباشر', url: streamUrl, headers: {} }];
-        
-        // توليد نفس واجهة المشغل (Player UI)
-        res.send(generateUI(channelHash, servers, secureToken, 'بث مباشر خاص', hostUrl)); 
-    } catch (error) {
-        res.send(generateOfflineUI('حدث خطأ في معالجة الرابط المباشر'));
-    }
 });
 
 app.get('/play/:hash', async (req, res) => {
