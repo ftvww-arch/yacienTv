@@ -1,22 +1,77 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
+const compression = require('compression');
+
 const app = express();
 
-// إخفاء ترويسات السيرفر وحماية الأساسيات
+// إعدادات أمان واستجابة السيرفر
 app.disable('x-powered-by');
-app.set('trust proxy', true); // تفعيل trust proxy لقراءة بروتوكولات Railway و Cloudflare بشكل صحيح
+app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// حماية خفيفة وسريعة ضد السبام والضغط (Rate Limiter)
+// الإعدادات العامة والتشفير
 // ==========================================
+const CONFIG = {
+    API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
+    TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
+    CACHE_DURATION: 300000, 
+    MANIFEST_CACHE: 2000,    
+    SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
+    TOKEN_EXPIRY: 10 * 60 * 1000, // 10 دقائق
+    MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
+    DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
+};
+
+// مفتاح ثابت لتشفير عناوين قطع الفيديو بـ AES-256 لمنع استخراج IP المصدر الأصلي
+const AES_KEY = crypto.scryptSync(CONFIG.SECRET_KEY, 'stream_salt', 32);
+const AES_IV = Buffer.alloc(16, 0);
+
+function encryptUrl(text) {
+    try {
+        const cipher = crypto.createCipheriv('aes-256-cbc', AES_KEY, AES_IV);
+        let encrypted = cipher.update(text, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        return encrypted;
+    } catch (e) {
+        return null;
+    }
+}
+
+function decryptUrl(encryptedHex) {
+    try {
+        const decipher = crypto.createDecipheriv('aes-256-cbc', AES_KEY, AES_IV);
+        let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (e) {
+        return null;
+    }
+}
+
+process.on('uncaughtException', (err) => { console.error('Uncaught Exception: ', err); });
+process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
+
+// ==========================================
+// الميدل وير (الحماية والضغط)
+// ==========================================
+
+// استثناء مسار قطع الفيديو من ضغط gZip لمنع تلف الـ Buffer
+app.use(compression({
+    filter: (req, res) => {
+        if (req.path.startsWith('/s/')) return false;
+        return compression.filter(req, res);
+    }
+}));
+
+// Rate Limiter خفيف للحماية من الهجمات
 const requestCounts = new Map();
 app.use((req, res, next) => {
     const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
     const now = Date.now();
-    const windowMs = 60 * 1000; // دقيقة واحدة
-    const maxRequests = 120; // الحد الأقصى للطلبات لكل IP في الدقيقة
+    const windowMs = 60 * 1000;
+    const maxRequests = 150;
 
     if (!requestCounts.has(ip)) {
         requestCounts.set(ip, { count: 1, startTime: now });
@@ -35,7 +90,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// تنظيف دوري للذاكرة المؤقتة للـ Rate Limiter
 setInterval(() => {
     const now = Date.now();
     for (const [ip, data] of requestCounts.entries()) {
@@ -44,24 +98,7 @@ setInterval(() => {
 }, 60000);
 
 // ==========================================
-// الإعدادات العامة 
-// ==========================================
-const CONFIG = {
-    API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
-    TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
-    CACHE_DURATION: 300000, 
-    MANIFEST_CACHE: 2000,    
-    SECRET_KEY: crypto.randomBytes(32).toString('hex'), 
-    TOKEN_EXPIRY: 10 * 60 * 1000, // يبقى التوكن قصير الأمان (10 دقائق) ويتم تجديده ديناميكياً
-    MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
-    DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
-};
-
-process.on('uncaughtException', (err) => { console.error('Caught exception: ', err); });
-process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
-
-// ==========================================
-// دوال التشفير والأمان
+// دوال التوكن والـ IP
 // ==========================================
 function generateSecureToken(ip) {
     const expires = Date.now() + CONFIG.TOKEN_EXPIRY;
@@ -89,11 +126,8 @@ function getClientIp(req) {
 function encodeId(text) { return Buffer.from(text).toString('hex'); }
 function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
 
-function encodeUrlBase64(url) { return Buffer.from(url).toString('base64url'); }
-function decodeUrlBase64(str) { try { return Buffer.from(str, 'base64url').toString('utf8'); } catch(e) { return null; } }
-
 // ==========================================
-// محرك الكاش (Cache Engine)
+// محرك الكاش الذكي (Cache Engine)
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -106,7 +140,7 @@ const CacheEngine = {
         this.inFlight.set(key, []);
         try {
             const data = await fetcher();
-            if (this.memory.size > 300) {
+            if (this.memory.size > 500) {
                 const firstKey = this.memory.keys().next().value;
                 this.memory.delete(firstKey);
             }
@@ -132,7 +166,7 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات المباراة أو القناة وعنوانها
+// جلب معلومات القنوات والسيرفرات
 // ==========================================
 async function getMatchInfo(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
@@ -175,9 +209,6 @@ async function getMatchInfo(realChannelName) {
     }
 }
 
-// ==========================================
-// جلب السيرفرات والمانيفست
-// ==========================================
 async function fetchChannelServers(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
@@ -222,7 +253,6 @@ async function fetchChannelServers(realChannelName) {
     return servers;
 }
 
-// تعديل جلب وتعديل المانيفست وتوجيه القطع لبروكسي السيرفر
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
     const headers = { 
@@ -268,9 +298,9 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
-        // تحويل روابط القطع لتعمل عبر بروكسي سيرفرك بـ Base64 وبروتوكول HTTPS
-        const encodedSegment = encodeUrlBase64(absoluteLink);
-        return `${hostUrl}/s/${encodedSegment}/segment.ts`;
+        // تشفير الرابط كاملاً بـ AES-256 لمنع استخراج IP المصدر الأصلي
+        const encryptedSegment = encryptUrl(absoluteLink);
+        return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
     });
 
     return rewrittenLines.join('\n');
@@ -280,10 +310,19 @@ async function fetchManifest(serverInfo, hostUrl) {
 // المسارات (Routes)
 // ==========================================
 
-// مسار بروكسي القطع TS المباشر والمحمي بالهيدرز
+// مسار التدفّق المباشر الموفر للذاكرة (Stream Pipe) والمحمي بـ AES-256
 app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
-    const targetUrl = decodeUrlBase64(req.params.encodedUrl);
-    if (!targetUrl) return res.status(400).send('Invalid Segment URL');
+    const targetUrl = decryptUrl(req.params.encodedUrl);
+    if (!targetUrl) return res.status(403).send('Access Denied');
+
+    // منع السرقة والتضمين المباشر من مواقع خارجية
+    const referer = (req.headers['referer'] || req.headers['origin'] || '').toLowerCase();
+    const host = req.get('host') || '';
+    const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
+
+    if (referer && !referer.includes(host) && !referer.includes(mainHost)) {
+        return res.status(403).send('Access Denied');
+    }
 
     try {
         const parsedUrl = new URL(targetUrl);
@@ -298,9 +337,10 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
             headers['Range'] = req.headers.range;
         }
 
+        // استخدام responseType: 'stream' للتدفق المباشر دون استهلاك الـ RAM
         const response = await axios.get(targetUrl, {
             headers,
-            responseType: 'arraybuffer',
+            responseType: 'stream',
             timeout: 10000,
             validateStatus: status => status >= 200 && status < 500
         });
@@ -309,12 +349,16 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        
+        // تمكين التخزين المؤقت على شبكات CDN لتوزيع الضغط
+        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
 
         if (response.headers['content-range']) {
             res.setHeader('Content-Range', response.headers['content-range']);
         }
 
-        res.status(response.status).send(Buffer.from(response.data));
+        res.status(response.status);
+        response.data.pipe(res);
     } catch (e) {
         res.status(500).send('Proxy Segment Error');
     }
@@ -430,7 +474,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية النهائية
+// الواجهة الديناميكية المحسنة للمشغل
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -454,6 +498,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>${matchTitle}</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <style>
@@ -713,7 +759,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 const data = await response.json();
                 if (data && data.token) {
                     currentToken = data.token;
-                    
                     if (hls) {
                         const newManifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
                         hls.loadSource(newManifestUrl);
@@ -805,7 +850,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         });
 
-        function showLoading() {
+        function showLoading(msg = 'جاري التحقق من البث المباشر...') {
+            document.querySelector('.loading-text').innerText = msg;
             loadingOverlay.style.opacity = '1';
             loadingOverlay.style.pointerEvents = 'auto';
         }
@@ -815,8 +861,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         }
 
         function changeServer(serverIndex, isManual = false) {
-            showLoading();
             currentServerIndex = parseInt(serverIndex);
+            showLoading('جاري الاتصال بالسيرفر ' + (currentServerIndex + 1) + '...');
             
             if (isManual) autoSwitchEnabled = false; 
             if (autoSwitchEnabled) serversTested++;
@@ -830,7 +876,18 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
-                hls = new Hls({ enableWorker: true }); 
+                // إعدادات محسنة لثبات الـ Buffer وسرعة الاتصال بالبث المباشر
+                hls = new Hls({ 
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    backBufferLength: 30,
+                    maxBufferLength: 15,
+                    maxMaxBufferLength: 30,
+                    manifestLoadingTimeOut: 8000,
+                    levelLoadingTimeOut: 8000,
+                    fragLoadingTimeOut: 10000,
+                    liveSyncDurationCount: 3
+                }); 
                 hls.loadSource(manifestUrl); 
                 hls.attachMedia(video);
                 
@@ -915,9 +972,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 </html>`;
 }
 
-// ==========================================
-// تصميم صفحة (البث غير متوفر حالياً) الاحترافي
-// ==========================================
 function generateOfflineUI(reasonMsg) {
     return `
 <!DOCTYPE html>
@@ -1023,5 +1077,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 Secure Monetized Player running on port ${PORT}`);
+    console.log(`🚀 Ultra Secure High-Performance Player running on port ${PORT}`);
 });
