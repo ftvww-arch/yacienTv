@@ -20,6 +20,7 @@ const CONFIG = {
     TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
+    // تأكد من إضافة SECRET_KEY كمتغير بيئة ثابت في Railway لمنع تغيره عند إعادة التشغيل
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     
@@ -31,21 +32,22 @@ const CONFIG = {
 const AES_KEY = crypto.scryptSync(CONFIG.SECRET_KEY, 'stream_salt', 32);
 const AES_IV = Buffer.alloc(16, 0);
 
+// تم تغيير 'hex' إلى 'base64url' لتقليل طول الرابط ومنع اقتطاعه من قبل مشغلات الفيديو
 function encryptUrl(text) {
     try {
         const cipher = crypto.createCipheriv('aes-256-cbc', AES_KEY, AES_IV);
-        let encrypted = cipher.update(text, 'utf8', 'hex');
-        encrypted += cipher.final('hex');
+        let encrypted = cipher.update(text, 'utf8', 'base64url');
+        encrypted += cipher.final('base64url');
         return encrypted;
     } catch (e) {
         return null;
     }
 }
 
-function decryptUrl(encryptedHex) {
+function decryptUrl(encryptedText) {
     try {
         const decipher = crypto.createDecipheriv('aes-256-cbc', AES_KEY, AES_IV);
-        let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+        let decrypted = decipher.update(encryptedText, 'base64url', 'utf8');
         decrypted += decipher.final('utf8');
         return decrypted;
     } catch (e) {
@@ -343,6 +345,14 @@ app.all('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
+// ==========================================
+// مسار دليل البرامج (EPG) لتفادي أخطاء 404
+// ==========================================
+app.get('/xmltv.php', (req, res) => {
+    res.type('application/xml');
+    res.send('<?xml version="1.0" encoding="UTF-8"?><tv></tv>');
+});
+
 app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:streamId.:ext', '/:username/:password/:streamId', '/:username/:password/:streamId.:ext'], async (req, res) => {
     const { username, password, streamId } = req.params;
 
@@ -373,8 +383,9 @@ app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:stre
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
-        console.error("CRITICAL STREAM ERROR:", error.message);
-        res.status(500).send(`Stream Error: ${error.message}`);
+        // تم تغيير حالة الخطأ إلى 404 بدلاً من 500 لتجنب تشنج التطبيقات عند انقطاع المصدر
+        console.error("STREAM NOT FOUND OR ERROR:", error.message);
+        res.status(404).send(`Stream Not Available`);
     }
 });
 
