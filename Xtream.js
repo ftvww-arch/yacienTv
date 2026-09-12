@@ -433,15 +433,15 @@ app.all('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
-// مسار تشغيل البث المباشر لتطبيقات Xtream Codes
-app.get('/live/:username/:password/:streamId', async (req, res) => {
+// مسار تشغيل البث المباشر لتطبيقات Xtream Codes (يدعم الامتدادات تلقائياً)
+app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:streamId.:ext'], async (req, res) => {
     const { username, password, streamId } = req.params;
 
     if (username !== CONFIG.XTREAM_USER || password !== CONFIG.XTREAM_PASS) {
         return res.status(403).send('Access Denied: Invalid Credentials');
     }
 
-    // تنظيف المعرف سواء كان ينتهي بـ .m3u8 أو .ts
+    // تنظيف معرف الـ Stream وإزالة أي امتداد مثل .m3u8 أو .ts أو .mp4
     const cleanHash = streamId.replace(/\.(m3u8|ts|mp4)$/i, '');
     const realChannel = decodeId(cleanHash);
 
