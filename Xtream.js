@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 const cors = require('cors');
 
 const app = express();
@@ -12,16 +13,43 @@ app.use(cors());
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// الإعدادات العامة (Config)
+// الإعدادات العامة والتشفير
 // ==========================================
 const CONFIG = {
     API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
     TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
+    SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 };
 
 const XTREAM_USER = "fadi";
 const XTREAM_PASS = "2026";
+
+// مفتاح ثابت لتشفير عناوين قطع الفيديو بـ AES-256 (من كودك الأصلي)
+const AES_KEY = crypto.scryptSync(CONFIG.SECRET_KEY, 'stream_salt', 32);
+const AES_IV = Buffer.alloc(16, 0);
+
+function encryptUrl(text) {
+    try {
+        const cipher = crypto.createCipheriv('aes-256-cbc', AES_KEY, AES_IV);
+        let encrypted = cipher.update(text, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        return encrypted;
+    } catch (e) {
+        return null;
+    }
+}
+
+function decryptUrl(encryptedHex) {
+    try {
+        const decipher = crypto.createDecipheriv('aes-256-cbc', AES_KEY, AES_IV);
+        let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (e) {
+        return null;
+    }
+}
 
 // ==========================================
 // محرك الكاش
@@ -60,7 +88,6 @@ app.get('/player_api.php', async (req, res) => {
         return res.json({ user_info: { auth: 0 } });
     }
 
-    // أ. الاستجابة الافتراضية (معلومات السيرفر والتسجيل)
     if (!action) {
         return res.json({
             user_info: {
@@ -69,7 +96,7 @@ app.get('/player_api.php', async (req, res) => {
                 message: "LOGGED IN",
                 auth: 1,
                 status: "Active",
-                exp_date: "1999999999", // تاريخ انتهاء بعيد جداً لمنع تعليق المشغل
+                exp_date: "1999999999",
                 is_trial: "0",
                 active_cons: "0",
                 created_at: "1350424535",
@@ -89,7 +116,6 @@ app.get('/player_api.php', async (req, res) => {
         });
     }
 
-    // ب. إرسال أقسام البث المباشر (Live)
     if (action === 'get_live_categories') {
         return res.json([
             { category_id: "1", category_name: "⚽ المباريات المباشرة اليوم", parent_id: 0 },
@@ -97,7 +123,6 @@ app.get('/player_api.php', async (req, res) => {
         ]);
     }
 
-    // ج. إرسال أقسام وهمية للأفلام والمسلسلات لإنهاء الفحص بسرعة
     if (action === 'get_vod_categories') {
         return res.json([{ category_id: "1", category_name: "قريباً - لا يوجد أفلام", parent_id: 0 }]);
     }
@@ -105,12 +130,10 @@ app.get('/player_api.php', async (req, res) => {
         return res.json([{ category_id: "1", category_name: "قريباً - لا يوجد مسلسلات", parent_id: 0 }]);
     }
 
-    // د. إرسال قوائم فارغة للأفلام والمسلسلات
     if (action === 'get_vod_streams' || action === 'get_series') {
         return res.json([]); 
     }
 
-    // هـ. إرسال قنوات البث المباشر حسب القسم
     if (action === 'get_live_streams') {
         let streams = [];
 
@@ -162,12 +185,11 @@ app.get('/player_api.php', async (req, res) => {
         return res.json(streams);
     }
 
-    // استجابة فارغة لأي طلب مجهول لتجنب التعليق
     return res.json([]);
 });
 
 // ==========================================
-// 2. مسار تشغيل البث المباشر (Direct M3U8 Generator)
+// 2. مسار تشغيل البث المباشر المدمج بنظامك الأصلي
 // ==========================================
 app.get('/live/:username/:password/:file', async (req, res) => {
     const { username, password, file } = req.params;
@@ -222,12 +244,26 @@ app.get('/live/:username/:password/:file', async (req, res) => {
 
         const m3u8Response = await axios.get(serverUrl, { headers, timeout: 8000 });
         const finalUrl = m3u8Response.request.res.responseUrl || serverUrl;
+        const hostUrl = `https://${req.get('host')}`;
+        const finalSearchParams = new URL(finalUrl).search;
         
         let lines = m3u8Response.data.split('\n');
+        
+        // هنا قمت بإرجاع نظام التشفير الخاص بك حرفياً
         let rewrittenLines = lines.map(line => {
-            let trimmed = line.trim();
+            let trimmed = line.trim().replace(/\r/g, '').replace(/\\$/g, '');
             if (!trimmed || trimmed.startsWith('#')) return trimmed;
-            try { return new URL(trimmed, finalUrl).href; } catch (e) { return trimmed; }
+
+            let absoluteLink = trimmed.startsWith('http') ? trimmed 
+                             : trimmed.startsWith('/') ? new URL(finalUrl).origin + trimmed 
+                             : new URL(trimmed, finalUrl).href;
+
+            if (finalSearchParams && !absoluteLink.includes('?')) {
+                absoluteLink += finalSearchParams;
+            }
+
+            const encryptedSegment = encryptUrl(absoluteLink);
+            return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
         });
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -240,8 +276,53 @@ app.get('/live/:username/:password/:file', async (req, res) => {
     }
 });
 
+// ==========================================
+// 3. مسار التدفق الأصلي والمشفر (Stream Pipe) 
+// ==========================================
+app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
+    const targetUrl = decryptUrl(req.params.encodedUrl);
+    if (!targetUrl) return res.status(403).send('Access Denied');
+
+    try {
+        const parsedUrl = new URL(targetUrl);
+        const headers = {
+            'User-Agent': CONFIG.DEFAULT_USER_AGENT,
+            'Accept': '*/*',
+            'Referer': `${parsedUrl.origin}/`,
+            'Origin': parsedUrl.origin
+        };
+
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
+
+        const response = await axios.get(targetUrl, {
+            headers,
+            responseType: 'stream',
+            timeout: 10000,
+            validateStatus: status => status >= 200 && status < 500
+        });
+
+        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        
+        // تمكين التخزين المؤقت كما في كودك الأصلي
+        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
+
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
+        }
+
+        res.status(response.status);
+        response.data.pipe(res);
+    } catch (e) {
+        res.status(500).send('Proxy Segment Error');
+    }
+});
+
 app.get('/', (req, res) => {
-    res.json({ name: "Yacine Xtream Emulator", status: "Online" });
+    res.json({ name: "Yacine Xtream Emulator - Pro", status: "Online" });
 });
 
 app.listen(PORT, () => {
