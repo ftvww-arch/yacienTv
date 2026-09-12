@@ -433,19 +433,15 @@ app.all('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
-// مسار إضافي لدعم المشغلات التي تطلب الرابط بدون كلمة live في المنتصف
+// مسار تشغيل البث المباشر لتطبيقات Xtream Codes (يدعم الامتدادات تلقائياً)
 app.get(['/:username/:password/:streamId', '/:username/:password/:streamId.:ext'], async (req, res) => {
     const { username, password, streamId } = req.params;
-
-    // استثناء المسارات الأساسية لكي لا تتعارض معها (مثل /api أو /play أو /direct)
-    if (['api', 'play', 'direct', 's', 'manifest', 'ping'].includes(username)) {
-        return res.status(404).send('Not Found');
-    }
 
     if (username !== CONFIG.XTREAM_USER || password !== CONFIG.XTREAM_PASS) {
         return res.status(403).send('Access Denied: Invalid Credentials');
     }
 
+    // تنظيف معرف الـ Stream وإزالة أي امتداد مثل .m3u8 أو .ts أو .mp4
     const cleanHash = streamId.replace(/\.(m3u8|ts|mp4)$/i, '');
     const realChannel = decodeId(cleanHash);
 
@@ -456,7 +452,7 @@ app.get(['/:username/:password/:streamId', '/:username/:password/:streamId.:ext'
         const serverInfo = servers[0]; 
         const hostUrl = `${req.protocol}://${req.get('host')}`;
 
-        const cacheKey = `xtream_manifest_alt_${realChannel}_0`;
+        const cacheKey = `xtream_manifest_${realChannel}_0`;
         const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -464,7 +460,7 @@ app.get(['/:username/:password/:streamId', '/:username/:password/:streamId.:ext'
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
-        console.error("Alternative Stream Error:", error.message);
+        console.error("Xtream Stream Error:", error.message);
         res.status(500).send('Stream Error');
     }
 });
