@@ -7,7 +7,7 @@ const app = express();
 // إعدادات السيرفر
 app.disable('x-powered-by');
 app.set('trust proxy', true);
-app.use(cors()); // السماح لجميع التطبيقات والمشغلات بالوصول
+app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 
@@ -20,12 +20,11 @@ const CONFIG = {
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 };
 
-// بيانات دخول Xtream الخاصة بك (يمكنك تغييرها)
 const XTREAM_USER = "fadi";
 const XTREAM_PASS = "2026";
 
 // ==========================================
-// محرك الكاش (لتخفيف الضغط وتسريع الاستجابة)
+// محرك الكاش
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -38,13 +37,12 @@ const CacheEngine = {
             this.memory.set(key, { data, expiresAt: Date.now() + ttlMs });
             return data;
         } catch (error) {
-            if (cached) return cached.data; // إرجاع البيانات القديمة في حال تعطل المصدر
+            if (cached) return cached.data;
             throw error;
         }
     }
 };
 
-// تنظيف الكاش المنتهي كل 60 ثانية
 setInterval(() => {
     const now = Date.now();
     for (const [key, value] of CacheEngine.memory.entries()) {
@@ -58,24 +56,25 @@ setInterval(() => {
 app.get('/player_api.php', async (req, res) => {
     const { username, password, action, category_id } = req.query;
 
-    // أ. التحقق من بيانات الدخول
     if (username !== XTREAM_USER || password !== XTREAM_PASS) {
         return res.json({ user_info: { auth: 0 } });
     }
 
-    // ب. الاستجابة الافتراضية (معلومات السيرفر والتسجيل)
+    // أ. الاستجابة الافتراضية (معلومات السيرفر والتسجيل)
     if (!action) {
         return res.json({
             user_info: {
                 username: XTREAM_USER,
                 password: XTREAM_PASS,
-                message: "Welcome to Yacine API Pro",
+                message: "LOGGED IN",
                 auth: 1,
                 status: "Active",
-                exp_date: "null",
+                exp_date: "1999999999", // تاريخ انتهاء بعيد جداً لمنع تعليق المشغل
                 is_trial: "0",
-                active_cons: 0,
-                max_connections: "99"
+                active_cons: "0",
+                created_at: "1350424535",
+                max_connections: "99",
+                allowed_output_formats: ["m3u8","ts","rtmp"]
             },
             server_info: {
                 url: req.hostname,
@@ -84,12 +83,13 @@ app.get('/player_api.php', async (req, res) => {
                 server_protocol: "http",
                 rtmp_port: "1935",
                 timestamp_now: Math.floor(Date.now() / 1000),
-                time_now: new Date().toISOString().replace('T', ' ').substring(0, 19)
+                time_now: new Date().toISOString().replace('T', ' ').substring(0, 19),
+                timezone: "Europe/Istanbul"
             }
         });
     }
 
-    // ج. إرسال الأقسام (Categories)
+    // ب. إرسال أقسام البث المباشر (Live)
     if (action === 'get_live_categories') {
         return res.json([
             { category_id: "1", category_name: "⚽ المباريات المباشرة اليوم", parent_id: 0 },
@@ -97,17 +97,29 @@ app.get('/player_api.php', async (req, res) => {
         ]);
     }
 
-    // د. إرسال القنوات حسب القسم (Streams)
+    // ج. إرسال أقسام وهمية للأفلام والمسلسلات لإنهاء الفحص بسرعة
+    if (action === 'get_vod_categories') {
+        return res.json([{ category_id: "1", category_name: "قريباً - لا يوجد أفلام", parent_id: 0 }]);
+    }
+    if (action === 'get_series_categories') {
+        return res.json([{ category_id: "1", category_name: "قريباً - لا يوجد مسلسلات", parent_id: 0 }]);
+    }
+
+    // د. إرسال قوائم فارغة للأفلام والمسلسلات
+    if (action === 'get_vod_streams' || action === 'get_series') {
+        return res.json([]); 
+    }
+
+    // هـ. إرسال قنوات البث المباشر حسب القسم
     if (action === 'get_live_streams') {
         let streams = [];
 
         try {
-            // جلب المباريات المباشرة (القسم 1)
             if (!category_id || category_id === "1") {
                 const matches = await CacheEngine.getOrFetch('matches_list', async () => {
                     const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
                     return res.data;
-                }, 60000); // كاش لمدة دقيقة
+                }, 60000);
 
                 matches.forEach((match, index) => {
                     let channelStr = match.channel || match.id_live || '';
@@ -118,20 +130,19 @@ app.get('/player_api.php', async (req, res) => {
                             num: index + 1,
                             name: match.title || match.name || `${match.team1} vs ${match.team2}`,
                             stream_type: "live",
-                            stream_id: cleanChannelId, // ID المشغل
-                            stream_icon: match.logo || "https://i.imgur.com/rXjJ09Y.png", // لوجو افتراضي
+                            stream_id: cleanChannelId,
+                            stream_icon: match.logo || "https://i.imgur.com/rXjJ09Y.png",
                             category_id: "1"
                         });
                     }
                 });
             }
 
-            // جلب قنوات التلفاز (القسم 2)
             if (!category_id || category_id === "2") {
                 const tvChannels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
                     const response = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
                     return response.data;
-                }, 300000); // كاش لمدة 5 دقائق
+                }, 300000);
 
                 tvChannels.forEach((ch, index) => {
                     streams.push({
@@ -151,23 +162,20 @@ app.get('/player_api.php', async (req, res) => {
         return res.json(streams);
     }
 
-    // هـ. استجابة فارغة لأي أقسام غير مدعومة (مثل الأفلام أو المسلسلات)
+    // استجابة فارغة لأي طلب مجهول لتجنب التعليق
     return res.json([]);
 });
 
 // ==========================================
 // 2. مسار تشغيل البث المباشر (Direct M3U8 Generator)
 // ==========================================
-// نستخدم :file لاستقبال الرابط سواء انتهى بـ .m3u8 أو .ts أو بدون امتداد
 app.get('/live/:username/:password/:file', async (req, res) => {
     const { username, password, file } = req.params;
 
-    // أ. التحقق من المستخدم
     if (username !== XTREAM_USER || password !== XTREAM_PASS) {
         return res.status(403).send('#EXTM3U\n#EXT-X-ERROR: Unauthorized User');
     }
 
-    // استخراج الـ ID الحقيقي للقناة بمسح الامتدادات
     const stream_id = file.split('.')[0];
     const isSatChannel = stream_id.startsWith('sat_');
     
@@ -178,12 +186,11 @@ app.get('/live/:username/:password/:file', async (req, res) => {
             'Accept': '*/*'
         };
 
-        // ب. تحديد رابط البث من المصدر
         if (isSatChannel) {
             const id = stream_id.replace('sat_', '');
             const channelData = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${id}.json`, { timeout: 5000 });
             if (channelData.data && channelData.data.servers && channelData.data.servers.length > 0) {
-                serverUrl = channelData.data.servers[0].url; // السيرفر الأول
+                serverUrl = channelData.data.servers[0].url;
                 if (channelData.data.servers[0].headers) headers = { ...headers, ...channelData.data.servers[0].headers };
             }
         } else {
@@ -210,27 +217,19 @@ app.get('/live/:username/:password/:file', async (req, res) => {
 
         if (!serverUrl) return res.status(404).send('#EXTM3U\n#EXT-X-ERROR: Stream not found or offline');
 
-        // ج. جلب محتوى ملف m3u8 وتحويل الروابط
         headers['Referer'] = new URL(serverUrl).origin + '/';
         headers['Origin'] = new URL(serverUrl).origin;
 
         const m3u8Response = await axios.get(serverUrl, { headers, timeout: 8000 });
         const finalUrl = m3u8Response.request.res.responseUrl || serverUrl;
         
-        // د. تحويل مسارات الفيديو (.ts) إلى روابط كاملة للمصدر الأصلي
         let lines = m3u8Response.data.split('\n');
         let rewrittenLines = lines.map(line => {
             let trimmed = line.trim();
             if (!trimmed || trimmed.startsWith('#')) return trimmed;
-            
-            try { 
-                return new URL(trimmed, finalUrl).href; 
-            } catch (e) { 
-                return trimmed; 
-            }
+            try { return new URL(trimmed, finalUrl).href; } catch (e) { return trimmed; }
         });
 
-        // إرجاع الملف الجاهز للمشغل
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(rewrittenLines.join('\n'));
@@ -241,16 +240,8 @@ app.get('/live/:username/:password/:file', async (req, res) => {
     }
 });
 
-// ==========================================
-// مسار التأكد من عمل السيرفر
-// ==========================================
 app.get('/', (req, res) => {
-    res.json({
-        name: "Yacine Xtream Emulator",
-        status: "Online",
-        developer: "Fadi Alatawna",
-        message: "Use player_api.php for Xtream Codes connection."
-    });
+    res.json({ name: "Yacine Xtream Emulator", status: "Online" });
 });
 
 app.listen(PORT, () => {
