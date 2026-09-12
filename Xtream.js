@@ -23,7 +23,7 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
-    TOKEN_EXPIRY: 10 * 60 * 1000,
+    TOKEN_EXPIRY: 10 * 60 * 1000, // 10 دقائق
     MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
     
@@ -76,7 +76,7 @@ app.use((req, res, next) => {
     const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
     const now = Date.now();
     const windowMs = 60 * 1000;
-    const maxRequests = 300; // زيادة الحد ليتناسب مع طلبات تطبيقات الـ IPTV
+    const maxRequests = 300; 
 
     if (!requestCounts.has(ip)) {
         requestCounts.set(ip, { count: 1, startTime: now });
@@ -103,29 +103,24 @@ setInterval(() => {
 }, 60000);
 
 // ==========================================
-// دوال التشفير والتوكن
+// دوال التشفير والتوكن (تم إزالة فحص الـ IP لمنع المشاكل)
 // ==========================================
-function generateSecureToken(ip) {
+function generateSecureToken() {
     const expires = Date.now() + CONFIG.TOKEN_EXPIRY;
-    const data = `${ip}:${expires}`;
-    const signature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(data).digest('hex');
-    return Buffer.from(`${data}:${signature}`).toString('base64');
+    const signature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(expires.toString()).digest('hex');
+    return Buffer.from(`${expires}:${signature}`).toString('base64');
 }
 
-function verifySecureToken(token, ip) {
+function verifySecureToken(token) {
     try {
         const decoded = Buffer.from(token, 'base64').toString('utf8');
-        const [tokenIp, expires, signature] = decoded.split(':');
+        const [expires, signature] = decoded.split(':');
         if (Date.now() > parseInt(expires)) return false; 
-        const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(`${tokenIp}:${expires}`).digest('hex');
-        return signature === expectedSignature && tokenIp === ip;
+        const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(expires.toString()).digest('hex');
+        return signature === expectedSignature;
     } catch (e) {
         return false;
     }
-}
-
-function getClientIp(req) { 
-    return req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip; 
 }
 
 function encodeId(text) { return Buffer.from(text).toString('hex'); }
@@ -196,13 +191,9 @@ async function getMatchInfo(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
+        // تعديل هام: لا تمنع التشغيل أبداً إذا لم تجد المباراة في الجدول. 
+        if (!targetMatch) return { isAvailable: true, title: realChannelName };
         
-        const channelField = targetMatch.channel || targetMatch.id_live;
-        if (!channelField || channelField.trim() === '') {
-            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
-        }
-
         let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
         if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
             matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
@@ -314,7 +305,6 @@ async function fetchManifest(serverInfo, hostUrl) {
 // 🚀 Xtream Codes API (واجهة مشغلات الـ IPTV)
 // ==========================================
 
-// 1. مسار تسجيل الدخول وجلب قوائم القنوات والمباريات
 app.all('/player_api.php', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -323,7 +313,6 @@ app.all('/player_api.php', async (req, res) => {
     const password = req.query.password || req.body.password;
     const action = req.query.action || req.body.action;
 
-    // التحقق من بيانات الدخول
     if (username !== CONFIG.XTREAM_USER || password !== CONFIG.XTREAM_PASS) {
         return res.status(200).json({
             user_info: { auth: 0, status: "Disabled", message: "بيانات الدخول غير صحيحة" }
@@ -334,7 +323,6 @@ app.all('/player_api.php', async (req, res) => {
     const protocol = req.protocol;
     const nowUnix = Math.floor(Date.now() / 1000);
 
-    // إذا لم يتوفر Action: إرجاع معلومات الحساب والسيرفر
     if (!action) {
         return res.json({
             user_info: {
@@ -343,7 +331,7 @@ app.all('/player_api.php', async (req, res) => {
                 message: "مرحباً بك في سيرفر البث المباشر",
                 auth: 1,
                 status: "Active",
-                exp_date: "1798761600", // تاريخ انتهاء غير محدود (2027+)
+                exp_date: "1798761600",
                 is_trial: "0",
                 active_cons: "0",
                 created_at: "1600000000",
@@ -363,7 +351,6 @@ app.all('/player_api.php', async (req, res) => {
         });
     }
 
-    // جلب تصنيفات القنوات (Categories)
     if (action === 'get_live_categories') {
         return res.json([
             { category_id: "1", category_name: "⚽ المباريات المباشرة", parent_id: 0 },
@@ -371,14 +358,12 @@ app.all('/player_api.php', async (req, res) => {
         ]);
     }
 
-    // جلب قائمة البث المباشر (Matches & Channels)
     if (action === 'get_live_streams') {
         const categoryId = req.query.category_id || req.body.category_id;
         let streams = [];
         let streamIndex = 1;
 
         try {
-            // 1. تصنيف المباريات المباشرة
             if (!categoryId || categoryId === "1") {
                 const matches = await CacheEngine.getOrFetch('matches_list', async () => {
                     const r = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -410,7 +395,6 @@ app.all('/player_api.php', async (req, res) => {
                 });
             }
 
-            // 2. تصنيف قنوات beIN Sports
             if (!categoryId || categoryId === "2") {
                 const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
                     const r = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
@@ -449,17 +433,15 @@ app.all('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
-// 2. مسار تشغيل البث المباشر المباشر لتطبيقات Xtream Codes
-// يدعم صيغ: /live/fadi/2026/STREAM_ID أو /live/fadi/2026/STREAM_ID.m3u8 أو .ts
-app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:streamId.:ext'], async (req, res) => {
+// مسار تشغيل البث المباشر لتطبيقات Xtream Codes
+app.get('/live/:username/:password/:streamId', async (req, res) => {
     const { username, password, streamId } = req.params;
 
-    // التحقق من الحساب
     if (username !== CONFIG.XTREAM_USER || password !== CONFIG.XTREAM_PASS) {
         return res.status(403).send('Access Denied: Invalid Credentials');
     }
 
-    // تنظيف معرف الـ Stream من امتدادات (.m3u8 أو .ts)
+    // تنظيف المعرف سواء كان ينتهي بـ .m3u8 أو .ts
     const cleanHash = streamId.replace(/\.(m3u8|ts|mp4)$/i, '');
     const realChannel = decodeId(cleanHash);
 
@@ -467,7 +449,7 @@ app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:stre
 
     try {
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[0]; // اختيار السيرفر الأساسي للبث
+        const serverInfo = servers[0]; 
         const hostUrl = `${req.protocol}://${req.get('host')}`;
 
         const cacheKey = `xtream_manifest_${realChannel}_0`;
@@ -528,7 +510,6 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     }
 });
 
-// رابط مباشر M3U8 لأي مشغل خارجي عادي (مثل VLC)
 app.get('/direct/:hash', async (req, res) => {
     try {
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -603,8 +584,7 @@ app.get('/api/channels', async (req, res) => {
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
 app.get('/api/refresh-token', (req, res) => {
-    const userIp = getClientIp(req);
-    const newToken = generateSecureToken(userIp);
+    const newToken = generateSecureToken();
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.json({ token: newToken });
@@ -617,24 +597,21 @@ app.get('/play/:hash', async (req, res) => {
         if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
 
         const matchInfo = await getMatchInfo(realChannel);
-        if (!matchInfo.isAvailable) return res.send(generateOfflineUI(matchInfo.reason));
-
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const userIp = getClientIp(req);
-        const secureToken = generateSecureToken(userIp);
+        
+        const secureToken = generateSecureToken();
         const hostUrl = `${req.protocol}://${req.get('host')}`;
         
         res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
     } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً'));
+        res.send(generateOfflineUI('البث غير متوفر حالياً، يرجى المحاولة لاحقاً.'));
     }
 });
 
 app.get('/manifest/:hash/:serverIndex', async (req, res) => {
     try {
         const token = req.query.token;
-        const userIp = getClientIp(req);
-        if (!token || !verifySecureToken(token, userIp)) return res.status(403).send('Invalid or Expired Token');
+        if (!token || !verifySecureToken(token)) return res.status(403).send('Invalid or Expired Token');
 
         const { hash, serverIndex } = req.params;
         const realChannel = decodeId(hash);
@@ -770,14 +747,26 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     video.play();
                     loadingOverlay.style.opacity = '0';
                 });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = manifestUrl;
+                video.addEventListener('loadedmetadata', () => { video.play(); loadingOverlay.style.opacity = '0'; });
             }
             document.getElementById('serverPopup').style.display = 'none';
         }
 
         changeServer(0);
 
+        setInterval(async () => {
+            try {
+                const response = await fetch('/api/refresh-token');
+                const data = await response.json();
+                if (data && data.token) currentToken = data.token;
+            } catch (e) {}
+        }, 8 * 60 * 1000);
+
         document.getElementById('playPauseBtn').addEventListener('click', () => {
-            if (video.paused) video.play(); else video.pause();
+            if (video.paused) { video.play(); document.getElementById('playIcon').style.display='none'; document.getElementById('pauseIcon').style.display='block'; } 
+            else { video.pause(); document.getElementById('playIcon').style.display='block'; document.getElementById('pauseIcon').style.display='none'; }
         });
         document.getElementById('settingsBtn').addEventListener('click', () => {
             const popup = document.getElementById('serverPopup');
