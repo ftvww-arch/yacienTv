@@ -5,11 +5,9 @@ const compression = require('compression');
 
 const app = express();
 
-// إعدادات البارسار لدعم طلبات Xtream عبر GET و POST
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// إعدادات أمان واستجابة السيرفر
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
@@ -23,16 +21,13 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
-    TOKEN_EXPIRY: 10 * 60 * 1000, // 10 دقائق
-    MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
-    DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+    DEFAULT_USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     
     // بيانات تسجيل الدخول الخاصة بـ Xtream Codes API
     XTREAM_USER: 'fadi',
     XTREAM_PASS: '2026'
 };
 
-// مفتاح تشفير AES-256 لروابط قطع الفيديو
 const AES_KEY = crypto.scryptSync(CONFIG.SECRET_KEY, 'stream_salt', 32);
 const AES_IV = Buffer.alloc(16, 0);
 
@@ -61,9 +56,6 @@ function decryptUrl(encryptedHex) {
 process.on('uncaughtException', (err) => { console.error('Uncaught Exception: ', err); });
 process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
 
-// ==========================================
-// الميدل وير (الحماية والضغط)
-// ==========================================
 app.use(compression({
     filter: (req, res) => {
         if (req.path.startsWith('/s/')) return false;
@@ -76,7 +68,7 @@ app.use((req, res, next) => {
     const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
     const now = Date.now();
     const windowMs = 60 * 1000;
-    const maxRequests = 300; 
+    const maxRequests = 500; 
 
     if (!requestCounts.has(ip)) {
         requestCounts.set(ip, { count: 1, startTime: now });
@@ -95,40 +87,9 @@ app.use((req, res, next) => {
     next();
 });
 
-setInterval(() => {
-    const now = Date.now();
-    for (const [ip, data] of requestCounts.entries()) {
-        if (now - data.startTime > 120000) requestCounts.delete(ip);
-    }
-}, 60000);
-
-// ==========================================
-// دوال التشفير والتوكن (تم إزالة فحص الـ IP لمنع المشاكل)
-// ==========================================
-function generateSecureToken() {
-    const expires = Date.now() + CONFIG.TOKEN_EXPIRY;
-    const signature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(expires.toString()).digest('hex');
-    return Buffer.from(`${expires}:${signature}`).toString('base64');
-}
-
-function verifySecureToken(token) {
-    try {
-        const decoded = Buffer.from(token, 'base64').toString('utf8');
-        const [expires, signature] = decoded.split(':');
-        if (Date.now() > parseInt(expires)) return false; 
-        const expectedSignature = crypto.createHmac('sha256', CONFIG.SECRET_KEY).update(expires.toString()).digest('hex');
-        return signature === expectedSignature;
-    } catch (e) {
-        return false;
-    }
-}
-
 function encodeId(text) { return Buffer.from(text).toString('hex'); }
 function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
 
-// ==========================================
-// محرك الكاش (Cache Engine)
-// ==========================================
 const CacheEngine = {
     memory: new Map(),
     inFlight: new Map(),
@@ -157,53 +118,6 @@ const CacheEngine = {
         }
     }
 };
-
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of CacheEngine.memory.entries()) {
-        if (now > value.expiresAt) CacheEngine.memory.delete(key);
-    }
-}, 30000);
-
-// ==========================================
-// جلب المانيفست والسيرفرات
-// ==========================================
-async function getMatchInfo(realChannelName) {
-    if (realChannelName.startsWith('sat_')) {
-        const channelId = realChannelName.replace('sat_', '');
-        try {
-            const channelData = await CacheEngine.getOrFetch(`sat_channel_info_${channelId}`, async () => {
-                const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 5000 });
-                return res.data;
-            }, CONFIG.CACHE_DURATION);
-            return { isAvailable: true, title: channelData.name || `Channel ${channelId}` };
-        } catch (e) {
-            return { isAvailable: true, title: `beIN Sports ${channelId}` };
-        }
-    }
-
-    try {
-        const matches = await CacheEngine.getOrFetch('matches_list', async () => {
-            const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
-            return res.data;
-        }, 60000);
-
-        const channelId = `live_tv_${realChannelName}`;
-        const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
-
-        // تعديل هام: لا تمنع التشغيل أبداً إذا لم تجد المباراة في الجدول. 
-        if (!targetMatch) return { isAvailable: true, title: realChannelName };
-        
-        let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
-        if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
-            matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
-        }
-
-        return { isAvailable: true, title: matchTitle };
-    } catch (e) {
-        return { isAvailable: true, title: realChannelName }; 
-    }
-}
 
 async function fetchChannelServers(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
@@ -302,7 +216,7 @@ async function fetchManifest(serverInfo, hostUrl) {
 }
 
 // ==========================================
-// 🚀 Xtream Codes API (واجهة مشغلات الـ IPTV)
+// 🚀 Xtream Codes API (Core)
 // ==========================================
 
 app.all('/player_api.php', async (req, res) => {
@@ -328,7 +242,7 @@ app.all('/player_api.php', async (req, res) => {
             user_info: {
                 username: CONFIG.XTREAM_USER,
                 password: CONFIG.XTREAM_PASS,
-                message: "مرحباً بك في سيرفر البث المباشر",
+                message: "مرحباً بك في السيرفر",
                 auth: 1,
                 status: "Active",
                 exp_date: "1798761600",
@@ -426,22 +340,21 @@ app.all('/player_api.php', async (req, res) => {
         }
     }
 
-    if (action === 'get_vod_categories' || action === 'get_series_categories') {
-        return res.json([]);
-    }
-
     return res.json([]);
 });
 
-// مسار تشغيل البث المباشر لتطبيقات Xtream Codes (يدعم الامتدادات تلقائياً)
-app.get(['/:username/:password/:streamId', '/:username/:password/:streamId.:ext'], async (req, res) => {
+// دعم جميع صيغ الروابط التي تطلبها المشغلات (مع /live/ أو بدونها)
+app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:streamId.:ext', '/:username/:password/:streamId', '/:username/:password/:streamId.:ext'], async (req, res) => {
     const { username, password, streamId } = req.params;
 
-    if (username !== CONFIG.XTREAM_USER || password !== CONFIG.XTREAM_PASS) {
-        return res.status(403).send('Access Denied: Invalid Credentials');
+    if (['api', 'ping'].includes(username)) {
+        return res.status(404).send('Not Found');
     }
 
-    // تنظيف معرف الـ Stream وإزالة أي امتداد مثل .m3u8 أو .ts أو .mp4
+    if (username !== CONFIG.XTREAM_USER || password !== CONFIG.XTREAM_PASS) {
+        return res.status(403).send('Access Denied');
+    }
+
     const cleanHash = streamId.replace(/\.(m3u8|ts|mp4)$/i, '');
     const realChannel = decodeId(cleanHash);
 
@@ -460,15 +373,13 @@ app.get(['/:username/:password/:streamId', '/:username/:password/:streamId.:ext'
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
-        console.error("Xtream Stream Error:", error.message);
         res.status(500).send('Stream Error');
     }
 });
 
 // ==========================================
-// المسارات العامة والبروكاسي (Proxy Engine)
+// البروكسي المفتوح للقطع (Segment Proxy)
 // ==========================================
-
 app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     const targetUrl = decryptUrl(req.params.encodedUrl);
     if (!targetUrl) return res.status(403).send('Access Denied');
@@ -489,7 +400,7 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
         const response = await axios.get(targetUrl, {
             headers,
             responseType: 'stream',
-            timeout: 10000,
+            timeout: 15000,
             validateStatus: status => status >= 200 && status < 500
         });
 
@@ -497,7 +408,7 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
-        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
+        res.setHeader('Cache-Control', 'no-cache');
 
         if (response.headers['content-range']) {
             res.setHeader('Content-Range', response.headers['content-range']);
@@ -510,300 +421,8 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     }
 });
 
-app.get('/direct/:hash', async (req, res) => {
-    try {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        const { hash } = req.params;
-        const realChannel = decodeId(hash);
-        if (!realChannel) return res.status(400).send('معرف القناة غير صالح');
-
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        let serverIndex = parseInt(req.query.server) || 0;
-        if (serverIndex >= servers.length || serverIndex < 0) serverIndex = 0;
-
-        const serverInfo = servers[serverIndex];
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-        const cacheKey = `direct_manifest_${realChannel}_${serverIndex}`;
-
-        const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
-
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Content-Disposition', `inline; filename="${realChannel}.m3u8"`);
-        res.send(manifestData);
-    } catch (error) {
-        res.status(500).send('خطأ في استخراج رابط البث');
-    }
-});
-
-app.get('/api/matches', async (req, res) => {
-    try {
-        const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
-        const matches = response.data;
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-
-        const formattedMatches = matches.map(match => {
-            let channelStr = match.channel || match.id_live || '';
-            let cleanChannel = channelStr.startsWith('live_tv_') ? channelStr.replace('live_tv_', '') : channelStr;
-            let embedUrl = cleanChannel ? `${hostUrl}/play/${encodeId(cleanChannel)}` : '';
-            
-            const { id_live, channel, ...safeMatch } = match;
-            return { ...safeMatch, URl: embedUrl };
-        });
-
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.json(formattedMatches);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch matches' });
-    }
-});
-
-app.get('/api/channels', async (req, res) => {
-    try {
-        const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
-            const response = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
-            return response.data;
-        }, 60000);
-
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-        const formattedChannels = channels.map(ch => ({
-            id: ch.id,
-            name: ch.name,
-            URl: `${hostUrl}/play/${encodeId(`sat_${ch.id}`)}`
-        }));
-
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        res.json(formattedChannels);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to fetch TV channels' });
-    }
-});
-
 app.get('/ping', (req, res) => res.send('Pong! Server is awake.'));
 
-app.get('/api/refresh-token', (req, res) => {
-    const newToken = generateSecureToken();
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.json({ token: newToken });
-});
-
-app.get('/play/:hash', async (req, res) => {
-    try {
-        const hash = req.params.hash;
-        const realChannel = decodeId(hash);
-        if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
-
-        const matchInfo = await getMatchInfo(realChannel);
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        
-        const secureToken = generateSecureToken();
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-        
-        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
-    } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً، يرجى المحاولة لاحقاً.'));
-    }
-});
-
-app.get('/manifest/:hash/:serverIndex', async (req, res) => {
-    try {
-        const token = req.query.token;
-        if (!token || !verifySecureToken(token)) return res.status(403).send('Invalid or Expired Token');
-
-        const { hash, serverIndex } = req.params;
-        const realChannel = decodeId(hash);
-        const cacheKey = `manifest_${realChannel}_${serverIndex}`;
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[parseInt(serverIndex)];
-        
-        const hostUrl = `${req.protocol}://${req.get('host')}`;
-        const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
-
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.send(manifestData);
-    } catch (error) {
-        res.status(500).send('Manifest Error');
-    }
-});
-
-// ==========================================
-// الواجهة الديناميكية للمشغل المدمج
-// ==========================================
-function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
-    const totalServers = servers.length;
-    const embedUrl = `${hostUrl}/play/${channelHash}`;
-
-    const serverItemsHtml = servers.map((srv, idx) => `
-        <div class="server-item ${idx === 0 ? 'active' : ''}" onclick="changeServer(${idx}, true)">
-            <div class="server-info">
-                <span class="en">${srv.name}</span>
-                <span class="ar" dir="rtl">السيرفر ${idx + 1}</span>
-            </div>
-            <svg class="check-icon" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-            <svg class="signal-icon" viewBox="0 0 24 24"><path d="M12 11c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 2c0-3.31-2.69-6-6-6s-6 2.69-6 6c0 2.22 1.21 4.15 3 5.19l1-1.74c-1.19-.7-2-1.97-2-3.45 0-2.21 1.79-4 4-4s4 1.79 4 4c0 1.48-.81 2.75-2 3.45l1 1.74c1.79-1.04 3-2.97 3-5.19Z"/></svg>
-        </div>
-    `).join('');
-
-    return `
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>${matchTitle}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body, html { height: 100%; width: 100%; background-color: #000; font-family: 'Tajawal', sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; }
-        .player-container { position: relative; width: 100%; height: 100%; max-width: 1200px; max-height: 800px; background-color: #000; overflow: hidden; }
-        .loading-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 25; transition: opacity 0.4s ease; }
-        .spinner { width: 50px; height: 50px; border: 4px solid rgba(255, 255, 255, 0.1); border-top: 4px solid #5c4dff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
-        .loading-text { color: #fff; font-size: 15px; font-weight: 500; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
-        .glass-bar { position: absolute; left: 50%; transform: translateX(-50%); z-index: 10; height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px); border-radius: 14px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.08); }
-        .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
-        .glass-bar.controls-bar { width: 86%; max-width: 820px; bottom: 25px; }
-        .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; }
-        .video-title { color: #e5e7eb; font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%; }
-        .left-controls { display: flex; align-items: center; gap: 8px; width: 100px; }
-        .live-dot { width: 8px; height: 8px; background-color: #ff3b30; border-radius: 50%; box-shadow: 0 0 8px rgba(255, 59, 48, 0.8); }
-        .live-text { color: #ffffff; font-size: 13px; font-weight: 700; }
-        .center-controls { position: absolute; left: 50%; transform: translateX(-50%); display: flex; justify-content: center; align-items: center; }
-        .play-pause-btn { width: 44px; height: 44px; background-color: #5c4dff; border: none; border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; }
-        .play-pause-icon { fill: #ffffff; width: 18px; height: 18px; }
-        .right-controls { display: flex; align-items: center; gap: 18px; width: 130px; justify-content: flex-end; }
-        .control-icon-btn { background: none; border: none; cursor: pointer; opacity: 0.8; }
-        .icon-svg { fill: #d1d5db; width: 20px; height: 20px; }
-        .server-popup { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 340px; background: rgba(20, 22, 35, 0.96); backdrop-filter: blur(16px); border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.12); color: white; z-index: 100; padding: 20px; }
-        .popup-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); padding-bottom: 10px; }
-        .server-list { display: flex; flex-direction: column; gap: 6px; max-height: 250px; overflow-y: auto; }
-        .server-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 10px; cursor: pointer; }
-        .server-item.active { background-color: rgba(92, 77, 255, 0.3); border: 1px solid rgba(92, 77, 255, 0.4); }
-        .check-icon { width: 18px; height: 18px; fill: #5c4dff; display: none; }
-        .signal-icon { width: 16px; height: 16px; fill: #9ca3af; }
-        .server-item.active .check-icon { display: block; }
-        .server-item.active .signal-icon { display: none; }
-    </style>
-</head>
-<body>
-    <div class="player-container" id="playerContainer">
-        <div id="loadingOverlay" class="loading-overlay">
-            <div class="spinner"></div>
-            <div class="loading-text">جاري التحقق من البث المباشر...</div>
-        </div>
-        <video id="video" playsinline webkit-playsinline autoplay></video>
-        <div class="glass-bar title-bar">
-            <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">ياسين Tv بلس</a>
-            <div class="video-title" dir="rtl">${matchTitle}</div>
-        </div>
-        <div id="serverPopup" class="server-popup">
-            <div class="popup-header">
-                <div>اختر الخادم للبث المباشر</div>
-                <button id="closeServerPopup" style="background:none;border:none;color:#fff;">&times;</button>
-            </div>
-            <div class="server-list">${serverItemsHtml}</div>
-        </div>
-        <div class="glass-bar controls-bar">
-            <div class="left-controls">
-                <div class="live-dot"></div>
-                <span class="live-text">LIVE</span>
-            </div>
-            <div class="center-controls">
-                <button class="play-pause-btn" id="playPauseBtn">
-                    <svg class="play-pause-icon" id="pauseIcon" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>
-                    <svg class="play-pause-icon" id="playIcon" style="display: none;" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>
-                </button>
-            </div>
-            <div class="right-controls">
-                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>
-            </div>
-        </div>
-    </div>
-    <script>
-        const video = document.getElementById('video');
-        const loadingOverlay = document.getElementById('loadingOverlay');
-        let hls = null;
-        let currentToken = '${secureToken}';
-        const channelHash = '${channelHash}';
-        let currentServerIndex = 0;
-
-        function changeServer(index) {
-            currentServerIndex = index;
-            loadingOverlay.style.opacity = '1';
-            const manifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
-            if (hls) { hls.destroy(); }
-            if (Hls.isSupported()) {
-                hls = new Hls({ enableWorker: true, lowLatencyMode: true });
-                hls.loadSource(manifestUrl);
-                hls.attachMedia(video);
-                hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play();
-                    loadingOverlay.style.opacity = '0';
-                });
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = manifestUrl;
-                video.addEventListener('loadedmetadata', () => { video.play(); loadingOverlay.style.opacity = '0'; });
-            }
-            document.getElementById('serverPopup').style.display = 'none';
-        }
-
-        changeServer(0);
-
-        setInterval(async () => {
-            try {
-                const response = await fetch('/api/refresh-token');
-                const data = await response.json();
-                if (data && data.token) currentToken = data.token;
-            } catch (e) {}
-        }, 8 * 60 * 1000);
-
-        document.getElementById('playPauseBtn').addEventListener('click', () => {
-            if (video.paused) { video.play(); document.getElementById('playIcon').style.display='none'; document.getElementById('pauseIcon').style.display='block'; } 
-            else { video.pause(); document.getElementById('playIcon').style.display='block'; document.getElementById('pauseIcon').style.display='none'; }
-        });
-        document.getElementById('settingsBtn').addEventListener('click', () => {
-            const popup = document.getElementById('serverPopup');
-            popup.style.display = popup.style.display === 'block' ? 'none' : 'block';
-        });
-        document.getElementById('closeServerPopup').addEventListener('click', () => {
-            document.getElementById('serverPopup').style.display = 'none';
-        });
-    </script>
-</body>
-</html>`;
-}
-
-function generateOfflineUI(reasonMsg) {
-    return `
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>البث غير متوفر</title>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@500;700&display=swap" rel="stylesheet">
-    <style>
-        body { margin: 0; background: #0b0c10; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Tajawal', sans-serif; color: white; }
-        .box { background: rgba(20,22,35,0.9); padding: 40px; border-radius: 16px; text-align: center; border: 1px solid rgba(255,255,255,0.1); }
-        .reason { color: #f59e0b; font-size: 18px; margin: 15px 0; font-weight: bold; }
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h2>عفواً، البث غير متاح حالياً</h2>
-        <div class="reason">${reasonMsg}</div>
-        <p>يرجى الانتظار، أو التحديث لاحقاً.</p>
-    </div>
-</body>
-</html>`;
-}
-
 app.listen(PORT, () => {
-    console.log(`🚀 Xtream & Ultra Secure Player Server running on port ${PORT}`);
+    console.log(`🚀 Pure Xtream Server running on port ${PORT}`);
 });
