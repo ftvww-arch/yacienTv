@@ -343,7 +343,6 @@ app.all('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
-// دعم جميع صيغ الروابط التي تطلبها المشغلات (مع /live/ أو بدونها)
 app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:streamId.:ext', '/:username/:password/:streamId', '/:username/:password/:streamId.:ext'], async (req, res) => {
     const { username, password, streamId } = req.params;
 
@@ -361,19 +360,21 @@ app.get(['/live/:username/:password/:streamId', '/live/:username/:password/:stre
     if (!realChannel) return res.status(404).send('Channel Not Found');
 
     try {
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
+        const servers = await fetchChannelServers(realChannel);
+        if (!servers || servers.length === 0) return res.status(404).send('No Servers Available');
+        
         const serverInfo = servers[0]; 
         const hostUrl = `${req.protocol}://${req.get('host')}`;
 
-        const cacheKey = `xtream_manifest_${realChannel}_0`;
-        const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
+        const manifestData = await fetchManifest(serverInfo, hostUrl);
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
-        res.status(500).send('Stream Error');
+        console.error("CRITICAL STREAM ERROR:", error.message);
+        res.status(500).send(`Stream Error: ${error.message}`);
     }
 });
 
