@@ -52,7 +52,7 @@ process.on('uncaughtException', (err) => { console.error('Uncaught Exception: ',
 process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
 
 // ==========================================
-// الميدل وير
+// الميدل وير وضبط الحماية
 // ==========================================
 app.use(compression({
     filter: (req, res) => {
@@ -63,10 +63,10 @@ app.use(compression({
 
 const requestCounts = new Map();
 app.use((req, res, next) => {
-    const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
+    const ip = getClientIp(req);
     const now = Date.now();
     const windowMs = 60 * 1000;
-    const maxRequests = 200;
+    const maxRequests = 250;
 
     if (!requestCounts.has(ip)) {
         requestCounts.set(ip, { count: 1, startTime: now });
@@ -115,7 +115,8 @@ function verifySecureToken(token, ip) {
 }
 
 function getClientIp(req) { 
-    return req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip; 
+    return req.headers['cf-connecting-ip'] || 
+           (req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip); 
 }
 
 function encodeId(text) { return Buffer.from(text).toString('hex'); }
@@ -241,27 +242,38 @@ async function fetchChannelServers(realChannelName) {
         try {
             let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
             let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-            servers.push({ 
-                name: srv.name || `سيرفر ${i + 1}`, 
-                url: innerData.url, 
-                headers: innerData.headers || {}, 
-                swap: innerData.swap || null 
-            });
+            
+            let parsedHeaders = {};
+            if (innerData.headers) {
+                parsedHeaders = typeof innerData.headers === 'string' ? JSON.parse(innerData.headers) : innerData.headers;
+            }
+
+            if (innerData.url) {
+                servers.push({ 
+                    name: srv.name || srv.data.name || `سيرفر ${i + 1}`, 
+                    url: innerData.url.trim(), 
+                    headers: parsedHeaders, 
+                    swap: innerData.swap || null 
+                });
+            }
         } catch (e) {}
     });
+
     if (servers.length === 0) throw new Error('لا توجد سيرفرات');
     return servers;
 }
 
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
+    
     const headers = { 
-        'User-Agent': serverInfo.headers['User-Agent'] || serverInfo.headers['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
+        'User-Agent': CONFIG.DEFAULT_USER_AGENT,
         'Accept': '*/*',
+        'Connection': 'keep-alive',
         'Referer': `${parsedTarget.origin}/`,
         'Origin': parsedTarget.origin
     };
-    
+
     if (serverInfo.headers) {
         Object.keys(serverInfo.headers).forEach(key => {
             if (key.toLowerCase() !== 'host') {
@@ -270,10 +282,17 @@ async function fetchManifest(serverInfo, hostUrl) {
         });
     }
 
-    const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
+    // المهلة 3.5 ثانية للتعرف السريع على الأخطاء للتحويل التلقائي عند حظر الخادم السحابي
+    const response = await axios.get(serverInfo.url, { 
+        headers, 
+        timeout: 3500,
+        maxRedirects: 5,
+        validateStatus: status => status >= 200 && status < 400
+    });
+
     let m3u8 = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
     
-    const finalUrl = response.request.res.responseUrl || serverInfo.url;
+    const finalUrl = response.request?.res?.responseUrl || serverInfo.url;
     const parsedFinalUrl = new URL(finalUrl);
     const baseUrl = parsedFinalUrl.origin;
     const finalSearchParams = parsedFinalUrl.search;
@@ -298,7 +317,6 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
-        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
@@ -337,10 +355,10 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     try {
         const parsedUrl = new URL(targetUrl);
         const headers = {
-            'User-Agent': customHeaders['User-Agent'] || customHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
+            'User-Agent': CONFIG.DEFAULT_USER_AGENT,
             'Accept': '*/*',
-            'Referer': customHeaders['Referer'] || `${parsedUrl.origin}/`,
-            'Origin': customHeaders['Origin'] || parsedUrl.origin,
+            'Referer': `${parsedUrl.origin}/`,
+            'Origin': parsedUrl.origin,
             ...customHeaders
         };
 
@@ -455,32 +473,25 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        // فحص Referer
-        if (referer && !referer.includes(host) && !referer.includes(mainHost)) {
-            console.log('❌ Blocked by Referer:', { referer, host, mainHost });
-            return res.status(403).send('Access Denied');
-        }
+        const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer', 'bot', 'crawler', 'spider', 'googlebot', 'bingbot'];
+        if (blockedAgents.some(agent => userAgent.includes(agent))) return res.status(403).send('Access Denied');
+        if (referer && !referer.includes(host) && !referer.includes(mainHost)) return res.status(403).send('Access Denied');
 
         const token = req.query.token;
         const userIp = getClientIp(req);
-        
-        // فحص التوكن والآيبي
-        if (!token || !verifySecureToken(token, userIp)) {
-            console.log('❌ Blocked by Token/IP:', { token, userIp, extractedIp: getClientIp(req) });
-            return res.status(403).send('Invalid or Expired Token');
-        }
+        if (!token || !verifySecureToken(token, userIp)) return res.status(403).send('Invalid or Expired Token');
 
         const { hash, serverIndex } = req.params;
         const realChannel = decodeId(hash);
         const cacheKey = `manifest_${realChannel}_${serverIndex}`;
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         
-        if (!servers[parseInt(serverIndex)]) {
-             console.log('❌ Server index not found');
-             return res.status(404).send('Server not found');
+        const serverIdxNum = parseInt(serverIndex);
+        if (isNaN(serverIdxNum) || !servers[serverIdxNum]) {
+            return res.status(404).send('Server Not Found');
         }
-        
-        const serverInfo = servers[parseInt(serverIndex)];
+
+        const serverInfo = servers[serverIdxNum];
         const hostUrl = `https://${req.get('host')}`;
         const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
 
@@ -489,7 +500,6 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
-        console.error('❌ Manifest Fetch Error:', error.message);
         res.status(500).send('Manifest Error');
     }
 });
@@ -574,7 +584,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             padding: 0 24px;
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
             border: 1px solid rgba(255, 255, 255, 0.08);
-            transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
+            transition: opacity 0.4s ease, transform 0.4s ease;
         }
 
         .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
@@ -740,7 +750,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let isPlaying = true;
         let autoSwitchEnabled = true; 
         let loadWatchdogTimer = null;
-        let stallRecoveryCount = 0;
 
         setInterval(async () => {
             try {
@@ -807,7 +816,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 isPlaying = true;
                 updatePlayPauseUI();
             }).catch(() => {
-                // Autoplay Policy Fallback: تشغيل بدون صوت فوراً لتفادي التعليق
                 video.muted = true;
                 video.play().then(() => {
                     hideLoading();
@@ -826,7 +834,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (isManual) autoSwitchEnabled = false;
 
             if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
-            // مؤقت حماية: إذا علّق السيرفر لأكثر من 6 ثوانٍ، يتم التحويل فوراً للسيرفر التالي
+            
+            // إذا تعثر السيرفر لأكثر من 4.5 ثوانٍ يتم التحويل تلقائياً للسيرفر القادم
             loadWatchdogTimer = setTimeout(() => {
                 if (autoSwitchEnabled && totalServers > 1) {
                     let nextServer = (currentServerIndex + 1) % totalServers;
@@ -834,7 +843,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 } else {
                     hideLoading();
                 }
-            }, 6000);
+            }, 4500);
 
             document.querySelectorAll('.server-item').forEach((item, idx) => {
                 if (idx === currentServerIndex) item.classList.add('active');
@@ -851,9 +860,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     backBufferLength: 15,
                     maxBufferLength: 10,
                     maxMaxBufferLength: 20,
-                    manifestLoadingTimeOut: 5000,
-                    levelLoadingTimeOut: 5000,
-                    fragLoadingTimeOut: 6000,
+                    manifestLoadingTimeOut: 4000,
+                    levelLoadingTimeOut: 4000,
+                    fragLoadingTimeOut: 5000,
                     liveSyncDurationCount: 2,
                     liveMaxLatencyDurationCount: 5,
                     maxLiveSyncPlaybackRate: 1.1
@@ -866,7 +875,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     attemptPlay();
                 });
 
-                // معالج الذكاء السريع عند حدوث تقطيع أو تعليق البث (Stalling Auto-Recovery)
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
                         switch (data.type) {
@@ -896,14 +904,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             serverPopup.style.display = 'none';
         }
 
-        // إنعاش البث عند حدوث التجمّد (Stall Monitor) بدون أن يشعر المستخدم ببطء
         video.addEventListener('stalled', () => {
             if (hls) hls.startLoad();
         });
         
         video.addEventListener('waiting', () => {
             if (hls && video.currentTime > 0) {
-                // قفزة تلقائية للنقطة الحية المباشرة في حال التعليق
                 if (video.buffered.length > 0) {
                     video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
                 }
@@ -1011,5 +1017,5 @@ function generateOfflineUI(reasonMsg) {
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 Ultra Secure High-Performance Player running on port ${PORT}`);
+    console.log(`🚀 Streaming Proxy Server running on port ${PORT}`);
 });
