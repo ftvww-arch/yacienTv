@@ -191,72 +191,69 @@ async function fetchManifest(serverInfo, hostUrl) {
     return rewrittenLines.join('\n');
 }
 
-async function fetchManifest(serverInfo, hostUrl) {
-    const parsedTarget = new URL(serverInfo.url);
-    const headers = { 
-        'User-Agent': serverInfo.headers['User-Agent'] || serverInfo.headers['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
-        'Accept': '*/*',
-        'Referer': `${parsedTarget.origin}/`,
-        'Origin': parsedTarget.origin
-    };
-    
-    if (serverInfo.headers) {
-        Object.keys(serverInfo.headers).forEach(key => {
-            if (key.toLowerCase() !== 'host') {
-                headers[key] = serverInfo.headers[key];
-            }
+// ==========================================
+// البروكسي (لنقل الحزم وتخطي الحماية)
+// ==========================================
+app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
+    const decrypted = decryptUrl(req.params.encodedUrl);
+    if (!decrypted) return res.status(403).send('Access Denied');
+
+    let targetUrl = '';
+    let customHeaders = {};
+
+    try {
+        const parsed = JSON.parse(decrypted);
+        targetUrl = parsed.url;
+        customHeaders = parsed.headers || {};
+    } catch (e) {
+        targetUrl = decrypted;
+    }
+
+    const referer = (req.headers['referer'] || req.headers['origin'] || '').toLowerCase();
+    const host = req.get('host') || '';
+    const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
+
+    if (referer && !referer.includes(host) && !referer.includes(mainHost)) {
+        return res.status(403).send('Access Denied');
+    }
+
+    try {
+        const parsedUrl = new URL(targetUrl);
+        const headers = {
+            'User-Agent': customHeaders['User-Agent'] || customHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
+            'Accept': '*/*',
+            'Referer': customHeaders['Referer'] || `${parsedUrl.origin}/`,
+            'Origin': customHeaders['Origin'] || parsedUrl.origin,
+            ...customHeaders
+        };
+
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
+
+        const response = await axios.get(targetUrl, {
+            headers,
+            responseType: 'stream',
+            timeout: 10000,
+            validateStatus: status => status >= 200 && status < 500
         });
-    }
 
-    const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
-    let m3u8 = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-    
-    const finalUrl = response.request.res.responseUrl || serverInfo.url;
-    const parsedFinalUrl = new URL(finalUrl);
-    const baseUrl = parsedFinalUrl.origin;
-    const finalSearchParams = parsedFinalUrl.search;
+        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
 
-    const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
-    const swapVal = swapKey ? serverInfo.swap[swapKey] : null;
-
-    // 🚀 بناء صيغة الهيدرز المدمجة لتطبيقات IPTV (ExoPlayer وغيرها)
-    let iptvHeaders = `|User-Agent=${headers['User-Agent']}`;
-    if (headers['Referer']) iptvHeaders += `&Referer=${headers['Referer']}`;
-    if (headers['Origin']) iptvHeaders += `&Origin=${headers['Origin']}`;
-
-    let lines = m3u8.split('\n');
-    let rewrittenLines = lines.map(line => {
-        let trimmed = line.trim().replace(/\r/g, '').replace(/\\$/g, '');
-        if (!trimmed || trimmed.startsWith('#')) return trimmed;
-
-        let absoluteLink = trimmed.startsWith('http') ? trimmed 
-                         : trimmed.startsWith('/') ? baseUrl + trimmed 
-                         : new URL(trimmed, finalUrl).href;
-
-        if (swapKey && absoluteLink.includes(swapKey)) {
-            absoluteLink = absoluteLink.replace(swapKey, swapVal);
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
         }
 
-        if (finalSearchParams && !absoluteLink.includes('?')) {
-            absoluteLink += finalSearchParams;
-        }
-
-        // إرجاع الرابط المباشر للمصدر مدمجاً معه الهيدرز
-        return absoluteLink + iptvHeaders;
-    });
-
-    let manifestText = rewrittenLines.join('\n');
-
-    // 🚀 إضافة دعم الهيدرز لمشغلات VLC في بداية الملف
-    if (manifestText.startsWith('#EXTM3U')) {
-        let vlcHeaders = `#EXTM3U\n`;
-        if (headers['User-Agent']) vlcHeaders += `#EXTVLCOPT:http-user-agent=${headers['User-Agent']}\n`;
-        if (headers['Referer']) vlcHeaders += `#EXTVLCOPT:http-referrer=${headers['Referer']}\n`;
-        manifestText = manifestText.replace('#EXTM3U\n', vlcHeaders);
+        res.status(response.status);
+        response.data.pipe(res);
+    } catch (e) {
+        res.status(500).send('Proxy Segment Error');
     }
-
-    return manifestText;
-}
+});
 
 // ==========================================
 // مسار Xtream API (المسؤول عن توفير قنوات الـ IPTV)
