@@ -243,9 +243,15 @@ app.get('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
-// مسار تشغيل قنوات الـ Xtream
-app.get('/live/:username/:password/:streamId.:ext', async (req, res) => {
-    const { username, password, streamId } = req.params;
+// ==========================================
+// دالة تشغيل البث الموحدة لجميع المشغلات
+// ==========================================
+const streamHandler = async (req, res) => {
+    const { username, password } = req.params;
+    let streamId = req.params.streamId;
+
+    // تنظيف اسم القناة (streamId) من الامتدادات (.m3u8 أو .ts) في حال أرسلها التطبيق
+    streamId = streamId.replace(/\.(m3u8|ts)$/, '');
 
     if (username !== '2026' || password !== '2026') {
         return res.status(401).send('Unauthorized');
@@ -255,7 +261,9 @@ app.get('/live/:username/:password/:streamId.:ext', async (req, res) => {
         const servers = await CacheEngine.getOrFetch(`servers_${streamId}`, () => fetchChannelServers(streamId), CONFIG.CACHE_DURATION);
         const serverInfo = servers[0]; // اختيار السيرفر الأول
         
-        const hostUrl = `${req.secure ? 'https' : 'http'}://${req.get('host')}`;
+        // تحسين توافقية البروتوكول (http/https) للعمل بشكل صحيح خلف البروكسي
+        const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+        const hostUrl = `${protocol}://${req.get('host')}`;
         
         const manifestData = await CacheEngine.getOrFetch(`manifest_${streamId}`, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
 
@@ -266,6 +274,23 @@ app.get('/live/:username/:password/:streamId.:ext', async (req, res) => {
     } catch (error) {
         res.status(404).send('#EXTM3U\n#EXTINF:-1,Stream Offline or Not Started\n');
     }
+};
+
+// ==========================================
+// مسارات Xtream التي تغطي كافة حالات تطبيقات IPTV
+// ==========================================
+
+// 1. التقاط المسار الرسمي (مع أو بدون امتداد)
+app.get('/live/:username/:password/:streamId', streamHandler);
+
+// 2. التقاط المسار المختصر (بدون /live)
+app.get('/:username/:password/:streamId', (req, res, next) => {
+    // منع تداخل هذا المسار مع مسارات النظام الأخرى (مثل البروكسي الخاص بك)
+    const restrictedPaths = ['s', 'api', 'player_api.php'];
+    if (restrictedPaths.includes(req.params.username)) {
+        return next(); 
+    }
+    streamHandler(req, res);
 });
 
 
