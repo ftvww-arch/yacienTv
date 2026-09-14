@@ -455,20 +455,32 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const host = req.get('host') || '';
         const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
 
-        const blockedAgents = ['vlc', 'mpv', 'potplayer', 'iptv', 'smartiptv', 'libvlc', 'python', 'axios', 'curl', 'postman', 'java', 'okhttp', 'wget', 'exoplayer', 'bot', 'crawler', 'spider', 'googlebot', 'bingbot'];
-        if (blockedAgents.some(agent => userAgent.includes(agent))) return res.status(403).send('Access Denied');
-        if (!referer.includes(host) && !referer.includes(mainHost)) return res.status(403).send('Access Denied');
+        // فحص Referer
+        if (referer && !referer.includes(host) && !referer.includes(mainHost)) {
+            console.log('❌ Blocked by Referer:', { referer, host, mainHost });
+            return res.status(403).send('Access Denied');
+        }
 
         const token = req.query.token;
         const userIp = getClientIp(req);
-        if (!token || !verifySecureToken(token, userIp)) return res.status(403).send('Invalid or Expired Token');
+        
+        // فحص التوكن والآيبي
+        if (!token || !verifySecureToken(token, userIp)) {
+            console.log('❌ Blocked by Token/IP:', { token, userIp, extractedIp: getClientIp(req) });
+            return res.status(403).send('Invalid or Expired Token');
+        }
 
         const { hash, serverIndex } = req.params;
         const realChannel = decodeId(hash);
         const cacheKey = `manifest_${realChannel}_${serverIndex}`;
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[parseInt(serverIndex)];
         
+        if (!servers[parseInt(serverIndex)]) {
+             console.log('❌ Server index not found');
+             return res.status(404).send('Server not found');
+        }
+        
+        const serverInfo = servers[parseInt(serverIndex)];
         const hostUrl = `https://${req.get('host')}`;
         const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
 
@@ -477,6 +489,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
+        console.error('❌ Manifest Fetch Error:', error.message);
         res.status(500).send('Manifest Error');
     }
 });
