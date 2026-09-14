@@ -10,7 +10,7 @@ app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// الإعدادات العامة والتشفير (من الكود الأول بالضبط)
+// الإعدادات العامة والتشفير
 // ==========================================
 const CONFIG = {
     API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
@@ -18,7 +18,6 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
-    TOKEN_EXPIRY: 10 * 60 * 1000,
     MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 };
@@ -49,7 +48,7 @@ function decryptUrl(encryptedHex) {
 }
 
 // ==========================================
-// محرك الكاش (من الكود الأول بالضبط)
+// محرك الكاش
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -88,7 +87,7 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات البث (من الكود الأول بالضبط)
+// جلب معلومات البث والمصادر
 // ==========================================
 async function fetchChannelServers(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
@@ -193,7 +192,7 @@ async function fetchManifest(serverInfo, hostUrl) {
 }
 
 // ==========================================
-// البروكسي (تم نسخه حرفياً من كودك الأول بدون أي تعديل)
+// البروكسي (لنقل الحزم وتخطي الحماية)
 // ==========================================
 app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     const decrypted = decryptUrl(req.params.encodedUrl);
@@ -256,7 +255,6 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     }
 });
 
-
 // ==========================================
 // مسار Xtream API (المسؤول عن توفير قنوات الـ IPTV)
 // ==========================================
@@ -315,7 +313,7 @@ app.get('/player_api.php', async (req, res) => {
 });
 
 // ==========================================
-// مسار البث المباشر (الرابط المباشر للمشغلات)
+// مسار البث المباشر (الرابط المباشر للمشغلات مع نظام الفحص التلقائي Failover)
 // ==========================================
 app.get('/:username/:password/:filename', async (req, res, next) => {
     const { username, password, filename } = req.params;
@@ -336,18 +334,37 @@ app.get('/:username/:password/:filename', async (req, res, next) => {
 
     try {
         const servers = await CacheEngine.getOrFetch(`servers_${streamId}`, () => fetchChannelServers(streamId), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[0]; // يعتمد على السيرفر الأول
         
         const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
         const hostUrl = `${protocol}://${req.get('host')}`;
         
-        const manifestData = await CacheEngine.getOrFetch(`manifest_${streamId}_0`, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
+        let manifestData = null;
+        let isWorking = false;
+
+        // 🔄 نظام الفحص الذكي (تجربة السيرفرات بالترتيب)
+        for (let i = 0; i < servers.length; i++) {
+            try {
+                const serverInfo = servers[i];
+                manifestData = await CacheEngine.getOrFetch(`manifest_${streamId}_${i}`, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
+                isWorking = true;
+                
+                console.log(`✅ القناة [${streamId}] تعمل الآن على السيرفر رقم ${i + 1}`);
+                break; // بمجرد نجاح التشغيل، يتم إيقاف الفحص
+            } catch (err) {
+                console.log(`⚠️ السيرفر ${i + 1} فشل في تشغيل [${streamId}]، جاري تجربة السيرفر التالي...`);
+            }
+        }
+
+        if (!isWorking) {
+            throw new Error('جميع السيرفرات متوقفة حالياً');
+        }
 
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(manifestData);
     } catch (error) {
+        console.error(`❌ القناة [${streamId}] غير متوفرة:`, error.message);
         res.status(404).send('#EXTM3U\n#EXTINF:-1,Stream Offline\n');
     }
 });
