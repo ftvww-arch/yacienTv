@@ -350,10 +350,26 @@ const streamHandler = async (req, res) => {
     }
 };
 
-app.get('/live/:username/:password/:streamId', streamHandler);
+// ==========================================
+// مسارات Xtream مع إعادة توجيه تلقائية لـ ExoPlayer
+// ==========================================
+
+app.get('/live/:username/:password/:streamId', (req, res, next) => {
+    // إذا كان الرابط لا يحتوي على امتداد، قم بإضافة .m3u8 وتوجيه المشغل إليه
+    if (!req.params.streamId.match(/\.(m3u8|ts)$/)) {
+        return res.redirect(302, req.path + '.m3u8');
+    }
+    streamHandler(req, res);
+});
+
 app.get('/:username/:password/:streamId', (req, res, next) => {
     const restrictedPaths = ['s', 'api', 'player_api.php', 'ping'];
     if (restrictedPaths.includes(req.params.username)) return next(); 
+    
+    // إذا كان الرابط لا يحتوي على امتداد، قم بإضافة .m3u8 وتوجيه المشغل إليه
+    if (!req.params.streamId.match(/\.(m3u8|ts)$/)) {
+        return res.redirect(302, req.path + '.m3u8');
+    }
     streamHandler(req, res);
 });
 
