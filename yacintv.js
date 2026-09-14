@@ -5,7 +5,6 @@ const compression = require('compression');
 
 const app = express();
 
-// إعدادات أمان واستجابة السيرفر
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
@@ -19,12 +18,11 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
-    TOKEN_EXPIRY: 10 * 60 * 1000, // 10 دقائق
+    TOKEN_EXPIRY: 10 * 60 * 1000,
     MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 };
 
-// مفتاح ثابت لتشفير عناوين قطع الفيديو بـ AES-256 لمنع استخراج IP المصدر الأصلي
 const AES_KEY = crypto.scryptSync(CONFIG.SECRET_KEY, 'stream_salt', 32);
 const AES_IV = Buffer.alloc(16, 0);
 
@@ -54,10 +52,8 @@ process.on('uncaughtException', (err) => { console.error('Uncaught Exception: ',
 process.on('unhandledRejection', (reason) => { console.error('Unhandled Rejection:', reason); });
 
 // ==========================================
-// الميدل وير (الحماية والضغط)
+// الميدل وير
 // ==========================================
-
-// استثناء مسار قطع الفيديو من ضغط gZip لمنع تلف الـ Buffer
 app.use(compression({
     filter: (req, res) => {
         if (req.path.startsWith('/s/')) return false;
@@ -65,13 +61,12 @@ app.use(compression({
     }
 }));
 
-// Rate Limiter خفيف للحماية من الهجمات
 const requestCounts = new Map();
 app.use((req, res, next) => {
     const ip = req.headers['x-forwarded-for'] ? req.headers['x-forwarded-for'].split(',')[0].trim() : req.ip;
     const now = Date.now();
     const windowMs = 60 * 1000;
-    const maxRequests = 150;
+    const maxRequests = 200;
 
     if (!requestCounts.has(ip)) {
         requestCounts.set(ip, { count: 1, startTime: now });
@@ -127,7 +122,7 @@ function encodeId(text) { return Buffer.from(text).toString('hex'); }
 function decodeId(hash) { try { return Buffer.from(hash, 'hex').toString('utf8'); } catch (e) { return null; } }
 
 // ==========================================
-// محرك الكاش الذكي (Cache Engine)
+// محرك الكاش
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -244,9 +239,14 @@ async function fetchChannelServers(realChannelName) {
     dataArray.forEach((srv, i) => {
         if (srv.result !== 0 || !srv.data) return;
         try {
-            let rawUrl = srv.data.url;
-            let innerData = typeof rawUrl === 'string' && rawUrl.trim().startsWith('{') ? JSON.parse(rawUrl.trim()) : { url: rawUrl.trim() };
-            servers.push({ name: srv.name || `سيرفر ${i + 1}`, url: innerData.url, headers: innerData.headers || {}, swap: innerData.swap || null });
+            let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
+            let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
+            servers.push({ 
+                name: srv.name || `سيرفر ${i + 1}`, 
+                url: innerData.url, 
+                headers: innerData.headers || {}, 
+                swap: innerData.swap || null 
+            });
         } catch (e) {}
     });
     if (servers.length === 0) throw new Error('لا توجد سيرفرات');
@@ -256,7 +256,7 @@ async function fetchChannelServers(realChannelName) {
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
     const headers = { 
-        'User-Agent': serverInfo.headers['user-agent'] || serverInfo.headers['User-Agent'] || CONFIG.DEFAULT_USER_AGENT,
+        'User-Agent': serverInfo.headers['User-Agent'] || serverInfo.headers['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
         'Accept': '*/*',
         'Referer': `${parsedTarget.origin}/`,
         'Origin': parsedTarget.origin
@@ -298,8 +298,9 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
-        // تشفير الرابط كاملاً بـ AES-256 لمنع استخراج IP المصدر الأصلي
-        const encryptedSegment = encryptUrl(absoluteLink);
+        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
+        const payload = JSON.stringify({ url: absoluteLink, headers });
+        const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
     });
 
@@ -310,12 +311,21 @@ async function fetchManifest(serverInfo, hostUrl) {
 // المسارات (Routes)
 // ==========================================
 
-// مسار التدفّق المباشر الموفر للذاكرة (Stream Pipe) والمحمي بـ AES-256
 app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
-    const targetUrl = decryptUrl(req.params.encodedUrl);
-    if (!targetUrl) return res.status(403).send('Access Denied');
+    const decrypted = decryptUrl(req.params.encodedUrl);
+    if (!decrypted) return res.status(403).send('Access Denied');
 
-    // منع السرقة والتضمين المباشر من مواقع خارجية
+    let targetUrl = '';
+    let customHeaders = {};
+
+    try {
+        const parsed = JSON.parse(decrypted);
+        targetUrl = parsed.url;
+        customHeaders = parsed.headers || {};
+    } catch (e) {
+        targetUrl = decrypted;
+    }
+
     const referer = (req.headers['referer'] || req.headers['origin'] || '').toLowerCase();
     const host = req.get('host') || '';
     const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
@@ -327,17 +337,17 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     try {
         const parsedUrl = new URL(targetUrl);
         const headers = {
-            'User-Agent': CONFIG.DEFAULT_USER_AGENT,
+            'User-Agent': customHeaders['User-Agent'] || customHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
             'Accept': '*/*',
-            'Referer': `${parsedUrl.origin}/`,
-            'Origin': parsedUrl.origin
+            'Referer': customHeaders['Referer'] || `${parsedUrl.origin}/`,
+            'Origin': customHeaders['Origin'] || parsedUrl.origin,
+            ...customHeaders
         };
 
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
-        // استخدام responseType: 'stream' للتدفق المباشر دون استهلاك الـ RAM
         const response = await axios.get(targetUrl, {
             headers,
             responseType: 'stream',
@@ -349,8 +359,6 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
-        
-        // تمكين التخزين المؤقت على شبكات CDN لتوزيع الضغط
         res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
 
         if (response.headers['content-range']) {
@@ -474,7 +482,7 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة الديناميكية المحسنة للمشغل
+// الواجهة وتجربة المشغل الذكية
 // ==========================================
 function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
@@ -529,7 +537,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             justify-content: center;
             align-items: center;
             z-index: 25;
-            transition: opacity 0.4s ease;
+            transition: opacity 0.3s ease;
         }
         .spinner { width: 50px; height: 50px; border: 4px solid rgba(255, 255, 255, 0.1); border-top: 4px solid #5c4dff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
         .loading-text { color: #fff; font-size: 15px; font-weight: 500; letter-spacing: 0.5px; }
@@ -556,30 +564,13 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
         }
 
-        .glass-bar.title-bar { 
-            width: 95%; max-width: 980px; 
-            height: 68px;
-            top: 25px; 
-        }
-        
-        .glass-bar.controls-bar { 
-            width: 86%; max-width: 820px; 
-            bottom: 25px;
-        }
+        .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
+        .glass-bar.controls-bar { width: 86%; max-width: 820px; bottom: 25px; }
 
         .player-container.hide-ui { cursor: none; }
-        
-        .player-container.hide-ui .glass-bar {
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        .player-container.hide-ui .glass-bar.title-bar {
-            transform: translate(-50%, -15px);
-        }
-        .player-container.hide-ui .glass-bar.controls-bar {
-            transform: translate(-50%, 15px);
-        }
+        .player-container.hide-ui .glass-bar { opacity: 0; pointer-events: none; }
+        .player-container.hide-ui .glass-bar.title-bar { transform: translate(-50%, -15px); }
+        .player-container.hide-ui .glass-bar.controls-bar { transform: translate(-50%, 15px); }
 
         .logo-text { color: #ffffff; font-size: 17px; font-weight: 700; text-decoration: none; transition: opacity 0.2s; letter-spacing: 0.5px; }
         .logo-text:hover { opacity: 0.8; }
@@ -641,10 +632,10 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     <div class="player-container" id="playerContainer">
         <div id="loadingOverlay" class="loading-overlay">
             <div class="spinner"></div>
-            <div class="loading-text">جاري التحقق من البث المباشر...</div>
+            <div class="loading-text">جاري الاتصال بالبث المباشر...</div>
         </div>
 
-        <video id="video" playsinline webkit-playsinline autoplay></video>
+        <video id="video" playsinline webkit-playsinline autoplay muted></video>
 
         <div class="glass-bar title-bar" id="titleBar">
             <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="logo-text">ياسين Tv بلس</a>
@@ -707,33 +698,17 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 if (!lastTime || (currentTime - lastTime > intervalTime)) {
                     localStorage.setItem(storageKey, currentTime);
                     var win = window.open(popUrl, '_blank');
-                    if (win) {
-                        win.blur();
-                        window.focus();
-                    }
+                    if (win) { win.blur(); window.focus(); }
                 }
             }
 
             var events = ['click', 'keydown', 'scroll', 'touchstart'];
             function handleUserInteraction() {
                 triggerPopunder();
-                events.forEach(function(event) {
-                    window.removeEventListener(event, handleUserInteraction);
-                });
+                events.forEach(function(event) { window.removeEventListener(event, handleUserInteraction); });
             }
 
-            events.forEach(function(event) {
-                window.addEventListener(event, handleUserInteraction, { once: true });
-            });
-
-            setInterval(function() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    window.open(popUrl, '_blank');
-                }
-            }, intervalTime);
+            events.forEach(function(event) { window.addEventListener(event, handleUserInteraction, { once: true }); });
         })();
     </script>
 
@@ -751,7 +726,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let currentServerIndex = 0;
         let isPlaying = true;
         let autoSwitchEnabled = true; 
-        let serversTested = 0; 
+        let loadWatchdogTimer = null;
+        let stallRecoveryCount = 0;
 
         setInterval(async () => {
             try {
@@ -759,14 +735,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 const data = await response.json();
                 if (data && data.token) {
                     currentToken = data.token;
-                    if (hls) {
-                        const newManifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
-                        hls.loadSource(newManifestUrl);
-                    }
                 }
-            } catch (e) {
-                console.error("فشل تجديد التوكن");
-            }
+            } catch (e) {}
         }, 8 * 60 * 1000);
 
         const playPauseBtn = document.getElementById('playPauseBtn');
@@ -805,68 +775,54 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             }
         }
 
-        function handleFullscreenChange() {
-            if (document.fullscreenElement || document.webkitFullscreenElement) {
-                titleBar.style.display = 'none';
-            } else {
-                titleBar.style.display = 'flex';
-            }
-        }
-        document.addEventListener('fullscreenchange', handleFullscreenChange);
-        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-
-        let clickCount = 0;
-        let clickTimer = null;
-        playerContainer.addEventListener('click', (e) => {
-            if (e.target.closest('.glass-bar') || e.target.closest('.server-popup') || e.target.closest('.modal')) return;
-            clickCount++;
-            if (clickCount === 1) {
-                clickTimer = setTimeout(() => {
-                    if (video.paused) video.play(); else video.pause();
-                    clickCount = 0;
-                }, 250);
-            } else if (clickCount === 2) {
-                clearTimeout(clickTimer);
-                toggleFullscreen();
-                clickCount = 0;
-            }
-        });
-
-        let lastTouchTime = 0;
-        playerContainer.addEventListener('touchend', (e) => {
-            if (e.target.closest('.glass-bar') || e.target.closest('.server-popup') || e.target.closest('.modal')) return;
-            const currentTime = new Date().getTime();
-            const tapLength = currentTime - lastTouchTime;
-            if (tapLength < 300 && tapLength > 0) {
-                e.preventDefault();
-                toggleFullscreen();
-                lastTouchTime = 0;
-            } else {
-                lastTouchTime = currentTime;
-                if (playerContainer.classList.contains('hide-ui')) {
-                    playerContainer.classList.remove('hide-ui');
-                    resetInactivityTimer();
-                }
-            }
-        });
-
-        function showLoading(msg = 'جاري التحقق من البث المباشر...') {
+        function showLoading(msg = 'جاري الاتصال بالبث المباشر...') {
             document.querySelector('.loading-text').innerText = msg;
             loadingOverlay.style.opacity = '1';
             loadingOverlay.style.pointerEvents = 'auto';
         }
+
         function hideLoading() {
             loadingOverlay.style.opacity = '0';
             loadingOverlay.style.pointerEvents = 'none';
+            if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
+        }
+
+        function attemptPlay() {
+            video.play().then(() => {
+                video.muted = false;
+                hideLoading();
+                isPlaying = true;
+                updatePlayPauseUI();
+            }).catch(() => {
+                // Autoplay Policy Fallback: تشغيل بدون صوت فوراً لتفادي التعليق
+                video.muted = true;
+                video.play().then(() => {
+                    hideLoading();
+                    isPlaying = true;
+                    updatePlayPauseUI();
+                }).catch(() => {
+                    hideLoading();
+                });
+            });
         }
 
         function changeServer(serverIndex, isManual = false) {
             currentServerIndex = parseInt(serverIndex);
             showLoading('جاري الاتصال بالسيرفر ' + (currentServerIndex + 1) + '...');
             
-            if (isManual) autoSwitchEnabled = false; 
-            if (autoSwitchEnabled) serversTested++;
-            
+            if (isManual) autoSwitchEnabled = false;
+
+            if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
+            // مؤقت حماية: إذا علّق السيرفر لأكثر من 6 ثوانٍ، يتم التحويل فوراً للسيرفر التالي
+            loadWatchdogTimer = setTimeout(() => {
+                if (autoSwitchEnabled && totalServers > 1) {
+                    let nextServer = (currentServerIndex + 1) % totalServers;
+                    changeServer(nextServer, false);
+                } else {
+                    hideLoading();
+                }
+            }, 6000);
+
             document.querySelectorAll('.server-item').forEach((item, idx) => {
                 if (idx === currentServerIndex) item.classList.add('active');
                 else item.classList.remove('active');
@@ -876,30 +832,28 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (hls) { hls.destroy(); hls = null; }
             
             if (Hls.isSupported()) {
-                // إعدادات محسنة لثبات الـ Buffer وسرعة الاتصال بالبث المباشر
                 hls = new Hls({ 
                     enableWorker: true,
                     lowLatencyMode: true,
-                    backBufferLength: 30,
-                    maxBufferLength: 15,
-                    maxMaxBufferLength: 30,
-                    manifestLoadingTimeOut: 8000,
-                    levelLoadingTimeOut: 8000,
-                    fragLoadingTimeOut: 10000,
-                    liveSyncDurationCount: 3
+                    backBufferLength: 15,
+                    maxBufferLength: 10,
+                    maxMaxBufferLength: 20,
+                    manifestLoadingTimeOut: 5000,
+                    levelLoadingTimeOut: 5000,
+                    fragLoadingTimeOut: 6000,
+                    liveSyncDurationCount: 2,
+                    liveMaxLatencyDurationCount: 5,
+                    maxLiveSyncPlaybackRate: 1.1
                 }); 
+
                 hls.loadSource(manifestUrl); 
                 hls.attachMedia(video);
                 
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play().then(() => {
-                        hideLoading();
-                        isPlaying = true;
-                        updatePlayPauseUI();
-                        autoSwitchEnabled = false; 
-                    }).catch(() => { hideLoading(); });
+                    attemptPlay();
                 });
 
+                // معالج الذكاء السريع عند حدوث تقطيع أو تعليق البث (Stalling Auto-Recovery)
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
                         switch (data.type) {
@@ -910,12 +864,10 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                                 hls.recoverMediaError();
                                 break;
                             default:
-                                if (autoSwitchEnabled && serversTested < totalServers) {
+                                if (autoSwitchEnabled && totalServers > 1) {
                                     let nextServer = (currentServerIndex + 1) % totalServers;
                                     changeServer(nextServer, false); 
                                 } else {
-                                    autoSwitchEnabled = false; 
-                                    hls.destroy();
                                     hideLoading();
                                 }
                                 break;
@@ -925,22 +877,35 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 video.src = manifestUrl; 
                 video.addEventListener('loadedmetadata', () => {
-                    video.play().then(() => {
-                        hideLoading();
-                        isPlaying = true;
-                        updatePlayPauseUI();
-                        autoSwitchEnabled = false;
-                    }).catch(() => { hideLoading(); });
+                    attemptPlay();
                 });
             }
             serverPopup.style.display = 'none';
         }
 
+        // إنعاش البث عند حدوث التجمّد (Stall Monitor) بدون أن يشعر المستخدم ببطء
+        video.addEventListener('stalled', () => {
+            if (hls) hls.startLoad();
+        });
+        
+        video.addEventListener('waiting', () => {
+            if (hls && video.currentTime > 0) {
+                // قفزة تلقائية للنقطة الحية المباشرة في حال التعليق
+                if (video.buffered.length > 0) {
+                    video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
+                }
+            }
+        });
+
         changeServer(0, false);
 
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (video.paused) video.play(); else video.pause();
+            if (video.paused) {
+                video.play();
+            } else {
+                video.pause();
+            }
         });
 
         video.addEventListener('play', () => { isPlaying = true; updatePlayPauseUI(); resetInactivityTimer(); });
@@ -1025,52 +990,8 @@ function generateOfflineUI(reasonMsg) {
         <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي</a>
         <div class="refresh-text"><div class="refresh-dot"></div> سيتم تحديث الصفحة تلقائياً للتحقق من البث</div>
     </div>
-    
     <script>
-        (function() {
-            var popUrl = "https://www.profitableratecpmnetwork.com/dt7p4re55n?key=79e122cb55d9d255c178d622752ffc18";
-            var intervalTime = 10 * 60 * 1000;
-            var storageKey = "last_popunder_time";
-
-            function triggerPopunder() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    var win = window.open(popUrl, '_blank');
-                    if (win) {
-                        win.blur();
-                        window.focus();
-                    }
-                }
-            }
-
-            var events = ['click', 'keydown', 'scroll', 'touchstart'];
-            function handleUserInteraction() {
-                triggerPopunder();
-                events.forEach(function(event) {
-                    window.removeEventListener(event, handleUserInteraction);
-                });
-            }
-
-            events.forEach(function(event) {
-                window.addEventListener(event, handleUserInteraction, { once: true });
-            });
-
-            setInterval(function() {
-                var currentTime = new Date().getTime();
-                var lastTime = localStorage.getItem(storageKey);
-                if (!lastTime || (currentTime - lastTime > intervalTime)) {
-                    localStorage.setItem(storageKey, currentTime);
-                    window.open(popUrl, '_blank');
-                }
-            }, intervalTime);
-        })();
-    </script>
-
-    <script>
-        setTimeout(() => { location.reload(); }, 60 * 1000);
+        setTimeout(() => { location.reload(); }, 45 * 1000);
     </script>
 </body>
 </html>`;
