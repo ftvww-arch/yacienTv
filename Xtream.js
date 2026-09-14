@@ -10,7 +10,7 @@ app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// الإعدادات العامة والتشفير
+// الإعدادات العامة والتشفير (من الكود الأول بالضبط)
 // ==========================================
 const CONFIG = {
     API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
@@ -18,6 +18,8 @@ const CONFIG = {
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
+    TOKEN_EXPIRY: 10 * 60 * 1000,
+    MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
     DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 };
 
@@ -47,7 +49,7 @@ function decryptUrl(encryptedHex) {
 }
 
 // ==========================================
-// محرك الكاش
+// محرك الكاش (من الكود الأول بالضبط)
 // ==========================================
 const CacheEngine = {
     memory: new Map(),
@@ -86,10 +88,9 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات البث والمصادر (مستعاد من الكود الأصلي لضمان الاستقرار)
+// جلب معلومات البث (من الكود الأول بالضبط)
 // ==========================================
 async function fetchChannelServers(realChannelName) {
-    // دعم قنوات الستالايت إذا تم طلبها
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
@@ -103,7 +104,6 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
-    // دعم المباريات
     const channelId = `live_tv_${realChannelName}`;
     let dataArray = null;
 
@@ -119,7 +119,7 @@ async function fetchChannelServers(realChannelName) {
         } catch (e) {}
     }
 
-    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات للبث');
+    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات');
 
     const servers = [];
     dataArray.forEach((srv, i) => {
@@ -135,7 +135,7 @@ async function fetchChannelServers(realChannelName) {
             });
         } catch (e) {}
     });
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات صالحة');
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات');
     return servers;
 }
 
@@ -150,7 +150,9 @@ async function fetchManifest(serverInfo, hostUrl) {
     
     if (serverInfo.headers) {
         Object.keys(serverInfo.headers).forEach(key => {
-            if (key.toLowerCase() !== 'host') headers[key] = serverInfo.headers[key];
+            if (key.toLowerCase() !== 'host') {
+                headers[key] = serverInfo.headers[key];
+            }
         });
     }
 
@@ -174,8 +176,13 @@ async function fetchManifest(serverInfo, hostUrl) {
                          : trimmed.startsWith('/') ? baseUrl + trimmed 
                          : new URL(trimmed, finalUrl).href;
 
-        if (swapKey && absoluteLink.includes(swapKey)) absoluteLink = absoluteLink.replace(swapKey, swapVal);
-        if (finalSearchParams && !absoluteLink.includes('?')) absoluteLink += finalSearchParams;
+        if (swapKey && absoluteLink.includes(swapKey)) {
+            absoluteLink = absoluteLink.replace(swapKey, swapVal);
+        }
+
+        if (finalSearchParams && !absoluteLink.includes('?')) {
+            absoluteLink += finalSearchParams;
+        }
 
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
@@ -185,9 +192,8 @@ async function fetchManifest(serverInfo, hostUrl) {
     return rewrittenLines.join('\n');
 }
 
-
 // ==========================================
-// مسار البروكسي (يجب أن يكون في الأعلى لتجنب التداخل)
+// البروكسي (تم نسخه حرفياً من كودك الأول بدون أي تعديل)
 // ==========================================
 app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     const decrypted = decryptUrl(req.params.encodedUrl);
@@ -204,30 +210,45 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
         targetUrl = decrypted;
     }
 
+    const referer = (req.headers['referer'] || req.headers['origin'] || '').toLowerCase();
+    const host = req.get('host') || '';
+    const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
+
+    if (referer && !referer.includes(host) && !referer.includes(mainHost)) {
+        return res.status(403).send('Access Denied');
+    }
+
     try {
         const parsedUrl = new URL(targetUrl);
         const headers = {
             'User-Agent': customHeaders['User-Agent'] || customHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
             'Accept': '*/*',
-            'Connection': 'keep-alive',
             'Referer': customHeaders['Referer'] || `${parsedUrl.origin}/`,
             'Origin': customHeaders['Origin'] || parsedUrl.origin,
             ...customHeaders
         };
 
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
+
         const response = await axios.get(targetUrl, {
             headers,
             responseType: 'stream',
-            timeout: 15000,
+            timeout: 10000,
             validateStatus: status => status >= 200 && status < 500
         });
 
         res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
+        res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Connection', 'keep-alive');
-        
-        if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
-        
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
+
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
+        }
+
         res.status(response.status);
         response.data.pipe(res);
     } catch (e) {
@@ -237,7 +258,7 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
 
 
 // ==========================================
-// مسارات Xtream Codes API
+// مسار Xtream API (المسؤول عن توفير قنوات الـ IPTV)
 // ==========================================
 app.get('/player_api.php', async (req, res) => {
     const { username, password, action } = req.query;
@@ -249,7 +270,7 @@ app.get('/player_api.php', async (req, res) => {
     if (!action) {
         return res.json({
             user_info: {
-                username: "2026", password: "2026", message: "Welcome to Matches Server",
+                username: "2026", password: "2026", message: "Welcome",
                 auth: 1, status: "Active", exp_date: "1999999999", is_trial: "0",
                 active_cons: "0", created_at: "1600000000", max_connections: "100",
                 allowed_output_formats: ["m3u8", "ts"]
@@ -262,47 +283,26 @@ app.get('/player_api.php', async (req, res) => {
     }
 
     if (action === 'get_live_categories') {
-        return res.json([
-            { category_id: "1", category_name: "مباريات اليوم (Live Matches)", parent_id: 0 },
-            { category_id: "2", category_name: "قنوات التلفاز (TV Channels)", parent_id: 0 }
-        ]);
+        return res.json([{ category_id: "1", category_name: "مباريات اليوم", parent_id: 0 }]);
     }
 
     if (action === 'get_live_streams') {
         try {
-            // جلب المباريات
             const matches = await CacheEngine.getOrFetch('matches_list', async () => {
                 const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
                 return response.data;
             }, 60000);
 
-            let streams = matches.map((match, index) => {
+            const streams = matches.map((match, index) => {
                 let channelStr = match.channel || match.id_live || '';
                 let cleanChannel = channelStr.startsWith('live_tv_') ? channelStr.replace('live_tv_', '') : channelStr;
                 let matchTitle = match.title || match.name || match.match_name || `${match.team1} vs ${match.team2}`;
-
                 return {
                     num: index + 1, name: matchTitle || `Match ${index + 1}`,
                     stream_type: "live", stream_id: cleanChannel, stream_icon: match.logo || match.image || "",
                     category_id: "1", added: Math.floor(Date.now() / 1000).toString(), custom_sid: "", tv_archive: 0, direct_source: ""
                 };
             });
-
-            // جلب القنوات الثابتة وإضافتها للتصنيف الثاني
-            try {
-                const channels = await CacheEngine.getOrFetch('tv_channels_index', async () => {
-                    const response = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channels_index.json`, { timeout: 8000 });
-                    return response.data;
-                }, 60000);
-
-                const channelStreams = channels.map((ch, index) => ({
-                    num: streams.length + index + 1, name: ch.name,
-                    stream_type: "live", stream_id: `sat_${ch.id}`, stream_icon: "",
-                    category_id: "2", added: Math.floor(Date.now() / 1000).toString(), custom_sid: "", tv_archive: 0, direct_source: ""
-                }));
-                streams = streams.concat(channelStreams);
-            } catch (err) { console.error("Failed to fetch static channels", err.message); }
-
             return res.json(streams);
         } catch (error) { return res.json([]); }
     }
@@ -314,67 +314,46 @@ app.get('/player_api.php', async (req, res) => {
     return res.json([]);
 });
 
-
 // ==========================================
-// دالة تشغيل البث الموحدة 
+// مسار البث المباشر (الرابط المباشر للمشغلات)
 // ==========================================
-const streamHandler = async (req, res) => {
-    const { username, password } = req.params;
-    let streamId = req.params.streamId;
+app.get('/:username/:password/:filename', async (req, res, next) => {
+    const { username, password, filename } = req.params;
 
-    // تنظيف الامتداد الذي يرسله التطبيق
-    streamId = streamId.replace(/\.(m3u8|ts)$/, '');
+    // استثناء المسارات الأساسية حتى لا تتداخل
+    const restrictedPaths = ['s', 'api', 'player_api.php', 'ping'];
+    if (restrictedPaths.includes(username)) {
+        return next();
+    }
 
-    if (username !== '2026' || password !== '2026') return res.status(401).send('Unauthorized');
+    // التحقق من اليوزر والباسورد
+    if (username !== '2026' || password !== '2026') {
+        return res.status(401).send('Unauthorized');
+    }
+
+    // استخراج اسم القناة بحذف .m3u8 أو .ts إن وجدت
+    const streamId = filename.replace(/\.(m3u8|ts)$/, '');
 
     try {
         const servers = await CacheEngine.getOrFetch(`servers_${streamId}`, () => fetchChannelServers(streamId), CONFIG.CACHE_DURATION);
-        const serverInfo = servers[0]; 
+        const serverInfo = servers[0]; // يعتمد على السيرفر الأول
         
         const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
         const hostUrl = `${protocol}://${req.get('host')}`;
         
-        const manifestData = await CacheEngine.getOrFetch(`manifest_${streamId}`, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
+        const manifestData = await CacheEngine.getOrFetch(`manifest_${streamId}_0`, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
 
-        // هيدرز قوية لمنع تطبيق الـ IPTV من إغلاق الاتصال (إصلاح الـ 499)
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Content-Disposition', `attachment; filename="${streamId}.m3u8"`);
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Connection', 'keep-alive');
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        
         res.send(manifestData);
     } catch (error) {
-        console.error(`Error fetching stream ${streamId}:`, error.message);
-        res.status(404).send('#EXTM3U\n#EXTINF:-1,Stream Offline or Not Started\n');
+        res.status(404).send('#EXTM3U\n#EXTINF:-1,Stream Offline\n');
     }
-};
-
-// ==========================================
-// مسارات Xtream مع إعادة توجيه تلقائية لـ ExoPlayer
-// ==========================================
-
-app.get('/live/:username/:password/:streamId', (req, res, next) => {
-    // إذا كان الرابط لا يحتوي على امتداد، قم بإضافة .m3u8 وتوجيه المشغل إليه
-    if (!req.params.streamId.match(/\.(m3u8|ts)$/)) {
-        return res.redirect(302, req.path + '.m3u8');
-    }
-    streamHandler(req, res);
 });
 
-app.get('/:username/:password/:streamId', (req, res, next) => {
-    const restrictedPaths = ['s', 'api', 'player_api.php', 'ping'];
-    if (restrictedPaths.includes(req.params.username)) return next(); 
-    
-    // إذا كان الرابط لا يحتوي على امتداد، قم بإضافة .m3u8 وتوجيه المشغل إليه
-    if (!req.params.streamId.match(/\.(m3u8|ts)$/)) {
-        return res.redirect(302, req.path + '.m3u8');
-    }
-    streamHandler(req, res);
-});
-
-app.get('/ping', (req, res) => res.send('Xtream Server is Running.'));
+app.get('/ping', (req, res) => res.send('Server is awake.'));
 
 app.listen(PORT, () => {
-    console.log(`🚀 Master Xtream IPTV Server running on port ${PORT}`);
+    console.log(`🚀 Xtream Player API running on port ${PORT}`);
 });
