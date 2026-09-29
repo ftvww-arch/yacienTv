@@ -20,9 +20,7 @@ const CONFIG = {
     SECRET_KEY: process.env.SECRET_KEY || 'my-super-secret-yacintv-key-2026', 
     TOKEN_EXPIRY: 10 * 60 * 1000,
     MAIN_WEBSITE: 'https://www.ytvplus.buzz/',
-    DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-    // رابط قناة الانتظار الذي طلبته (سيعمل كقناة 24/7 قبل بدء المباريات)
-    WAITING_CHANNEL_URL: 'http://assets.pushyourcss.world:8080/assets/res2/java2/1319.css?x=/hls'
+    DEFAULT_USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
 };
 
 const AES_KEY = crypto.scryptSync(CONFIG.SECRET_KEY, 'stream_salt', 32);
@@ -188,18 +186,15 @@ async function getMatchInfo(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
+        // إذا لم يتم العثور على المباراة، فهذا يعني أنها انتهت وتم حذفها من الـ API
         if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
         
-        const channelField = targetMatch.channel || targetMatch.id_live;
-        if (!channelField || channelField.trim() === '') {
-            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
-        }
-
         let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
         if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
             matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
         }
 
+        // إذا وجدت، نعتبرها متاحة للتشغيل (سواء جارية أو لم تبدأ)
         return { isAvailable: true, title: matchTitle };
     } catch (e) {
         return { isAvailable: true, title: realChannelName }; 
@@ -255,7 +250,6 @@ async function fetchChannelServers(realChannelName) {
     return servers;
 }
 
-// دالة جلب المانيفست الأساسية (وهي قادرة على التقاط الروابط حتى لو كانت بصيغة js و css)
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
     const headers = { 
@@ -301,7 +295,6 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
-        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
@@ -375,21 +368,6 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
     }
 });
 
-// مسار مخصص لتشغيل قناة الانتظار 24/7 عبر البروكسي (لتفادي مشاكل HTTPS وحل مشكلة صيغ السيرفر الخاص بك)
-app.get('/fallback.m3u8', async (req, res) => {
-    try {
-        const hostUrl = `https://${req.get('host')}`;
-        const serverInfo = { url: CONFIG.WAITING_CHANNEL_URL, headers: {} };
-        const manifestData = await fetchManifest(serverInfo, hostUrl);
-        
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.send(manifestData);
-    } catch (error) {
-        res.status(500).send('Fallback Error');
-    }
-});
-
 app.get('/api/matches', async (req, res) => {
     try {
         const response = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -446,7 +424,7 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
-// المسار الرئيسي لتشغيل المباراة (تم التعديل لدعم واجهة الانتظار والنهاية)
+// مسار التشغيل المُعدّل بناءً على طلبك
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -457,26 +435,17 @@ app.get('/play/:hash', async (req, res) => {
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `https://${req.get('host')}`;
-        
-        let matchStatus = 'live'; 
-        // سيتم تشغيل قناة الانتظار عبر البروكسي الخاص بنا لتفادي أي أخطاء
-        let fallbackUrl = `${hostUrl}/fallback.m3u8`;
 
+        // إذا لم تكن المباراة في الـ API، نرسل حالة انتهت
         if (!matchInfo.isAvailable) {
-            // إذا لم يتم العثور على المباراة في الـ API (انتهت)
-            if (matchInfo.reason === 'المباراة غير مدرجة في جدول البث') {
-                matchStatus = 'ended'; 
-            } else {
-                // المباراة موجودة لكن لا يوجد رابط سيرفر (لم تبدأ)
-                matchStatus = 'not_started'; 
-            }
-            return res.send(generateUI(hash, [], secureToken, matchInfo.title, hostUrl, matchStatus, fallbackUrl));
+            return res.send(generateUI(hash, [], secureToken, matchInfo.title, hostUrl, 'ended'));
         }
 
+        // إذا كانت جارية أو لم تبدأ، نجلب السيرفرات كالمعتاد
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl, matchStatus, fallbackUrl)); 
+        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl, 'live')); 
     } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً'));
+        res.send(generateOfflineUI('البث غير متوفر حالياً، يرجى المحاولة لاحقاً.'));
     }
 });
 
@@ -514,9 +483,9 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة وتجربة المشغل الذكية (النسخة المعدلة بالكامل)
+// الواجهة وتجربة المشغل الذكية (تم إضافة شاشة النهاية داخل المشغل)
 // ==========================================
-function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matchStatus = 'live', fallbackUrl = '') {
+function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matchStatus = 'live') {
     const totalServers = servers.length;
     const embedUrl = `${hostUrl}/play/${channelHash}`;
 
@@ -562,10 +531,20 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         .loading-text { color: #fff; font-size: 15px; font-weight: 500; letter-spacing: 0.5px; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
+        /* شاشة نهاية المباراة داخل المشغل */
+        .ended-overlay {
+            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle at center, #1a1c29 0%, #000000 100%);
+            z-index: 20; flex-direction: column; justify-content: center; align-items: center; text-align: center;
+        }
+        .ended-icon { width: 72px; height: 72px; fill: #ff3b30; margin-bottom: 20px; filter: drop-shadow(0 0 10px rgba(255,59,48,0.5)); }
+        .ended-title { color: #fff; font-size: 28px; font-weight: 800; margin-bottom: 10px; }
+        .ended-desc { color: #9ca3af; font-size: 16px; font-weight: 500; max-width: 80%; }
+
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
 
         .glass-bar {
-            position: absolute; left: 50%; transform: translateX(-50%); z-index: 10;
+            position: absolute; left: 50%; transform: translateX(-50%); z-index: 30;
             height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px);
             -webkit-backdrop-filter: blur(14px); border-radius: 14px;
             display: flex; align-items: center; justify-content: space-between;
@@ -629,10 +608,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         #copyEmbedBtn { background-color: #5c4dff; color: white; border: none; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: 700; font-size: 14px; transition: background-color 0.2s; }
         #copyEmbedBtn:hover { background-color: #4a3be0; }
 
-        /* شاشة نهاية المباراة */
-        #endedMessage { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #0a0b10; z-index: 9999; justify-content: center; align-items: center; flex-direction: column; text-align: center; }
-        #endedMessage h2 { color: #fff; font-size: 28px; font-weight: 800; background: rgba(255, 255, 255, 0.05); padding: 40px 60px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-
         @media (max-width: 768px) {
             .glass-bar.title-bar { width: 96%; padding: 0 16px; top: 15px; }
             .glass-bar.controls-bar { width: 92%; padding: 0 16px; bottom: 15px; }
@@ -642,15 +617,18 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
 </head>
 <body>
 
-    <!-- شاشة انتهاء المباراة المظلمة -->
-    <div id="endedMessage">
-        <h2>انتهت المباراه لا يوجد شئ هنا</h2>
-    </div>
-
     <div class="player-container" id="playerContainer">
+        
         <div id="loadingOverlay" class="loading-overlay">
             <div class="spinner"></div>
             <div class="loading-text">جاري الاتصال بالبث المباشر...</div>
+        </div>
+
+        <!-- شاشة نهاية المباراة المدمجة داخل المشغل -->
+        <div id="endedOverlay" class="ended-overlay">
+            <svg class="ended-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+            <h2 class="ended-title">انتهت المباراة</h2>
+            <p class="ended-desc">لا يوجد بث متاح حالياً لهذه المباراة.</p>
         </div>
 
         <video id="video" playsinline webkit-playsinline autoplay muted></video>
@@ -734,8 +712,8 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         const video = document.getElementById('video');
         const playerContainer = document.getElementById('playerContainer');
         const loadingOverlay = document.getElementById('loadingOverlay');
-        const titleBar = document.getElementById('titleBar');
-        const endedMessage = document.getElementById('endedMessage');
+        const endedOverlay = document.getElementById('endedOverlay');
+        const controlsBar = document.getElementById('controlsBar');
         const settingsBtn = document.getElementById('settingsBtn');
         let hls = null;
         
@@ -743,7 +721,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         const channelHash = '${channelHash}';
         const totalServers = ${totalServers};
         const matchStatus = '${matchStatus}';
-        const fallbackUrl = '${fallbackUrl}';
         
         let currentServerIndex = 0;
         let isPlaying = true;
@@ -772,6 +749,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
 
         let inactivityTimeout;
         function resetInactivityTimer() {
+            if (matchStatus === 'ended') return;
             playerContainer.classList.remove('hide-ui');
             clearTimeout(inactivityTimeout);
             inactivityTimeout = setTimeout(() => {
@@ -828,7 +806,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
                     if (data.fatal) {
                         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
                         else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-                        else if (autoSwitchEnabled && totalServers > 1 && matchStatus === 'live') {
+                        else if (autoSwitchEnabled && totalServers > 1) {
                             changeServer((currentServerIndex + 1) % totalServers, false);
                         }
                     }
@@ -869,16 +847,15 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         });
 
         // ===================================
-        // توجيه ذكي حسب حالة المباراة
+        // المعالجة الذكية لحالة المباراة
         // ===================================
-        if (matchStatus === 'ended') {
-            playerContainer.style.display = 'none';
-            endedMessage.style.display = 'flex';
-        } else if (matchStatus === 'not_started' || totalServers === 0) {
-            settingsBtn.style.display = 'none';
-            showLoading('جاري اتصال بقناة الانتظار...');
-            initializePlayer(fallbackUrl);
+        if (matchStatus === 'ended' || totalServers === 0) {
+            // المباراة انتهت: نخفي شاشة التحميل وأزرار التحكم ونظهر رسالة الانتهاء بتصميم المشغل
+            loadingOverlay.style.display = 'none';
+            controlsBar.style.display = 'none';
+            endedOverlay.style.display = 'flex';
         } else {
+            // المباراة لم تبدأ أو جارية: نقوم بتشغيل السيرفرات القادمة من الـ API بشكل طبيعي
             changeServer(0, false);
         }
         // ===================================
