@@ -164,6 +164,7 @@ setInterval(() => {
 // جلب معلومات القنوات والسيرفرات
 // ==========================================
 async function getMatchInfo(realChannelName) {
+    // التعديل الثاني: دائماً اجعل القنوات والمباريات متاحة وتعمل فوراً حتى لو لم تبدأ بعد
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         try {
@@ -186,15 +187,15 @@ async function getMatchInfo(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        // إذا لم يتم العثور على المباراة، فهذا يعني أنها انتهت وتم حذفها من الـ API
-        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
-        
-        let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
-        if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
-            matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
+        let matchTitle = realChannelName;
+        if (targetMatch) {
+            matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
+            if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
+                matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
+            }
         }
 
-        // إذا وجدت، نعتبرها متاحة للتشغيل (سواء جارية أو لم تبدأ)
+        // إرجاع isAvailable: true بشكل دائم لتشغيل القناة مباشرة
         return { isAvailable: true, title: matchTitle };
     } catch (e) {
         return { isAvailable: true, title: realChannelName }; 
@@ -250,6 +251,7 @@ async function fetchChannelServers(realChannelName) {
     return servers;
 }
 
+// التعديل الأول: دعم تشغيل السيرفرات بنمط .css?x=/hls وتوليد قائمة تشغيل مخصصة
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
     const headers = { 
@@ -272,7 +274,13 @@ async function fetchManifest(serverInfo, hostUrl) {
     
     const finalUrl = response.request.res.responseUrl || serverInfo.url;
     const parsedFinalUrl = new URL(finalUrl);
+
+    // حساب المسار الأساسي لدعم الروابط النسبية والروابط الممتدة مثل /assets/res2/java2/
     const baseUrl = parsedFinalUrl.origin;
+    const pathSegments = parsedFinalUrl.pathname.split('/');
+    pathSegments.pop();
+    const currentFolderPath = baseUrl + pathSegments.join('/') + '/';
+
     const finalSearchParams = parsedFinalUrl.search;
 
     const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
@@ -283,9 +291,14 @@ async function fetchManifest(serverInfo, hostUrl) {
         let trimmed = line.trim().replace(/\r/g, '').replace(/\\$/g, '');
         if (!trimmed || trimmed.startsWith('#')) return trimmed;
 
-        let absoluteLink = trimmed.startsWith('http') ? trimmed 
-                         : trimmed.startsWith('/') ? baseUrl + trimmed 
-                         : new URL(trimmed, finalUrl).href;
+        let absoluteLink = '';
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+            absoluteLink = trimmed;
+        } else if (trimmed.startsWith('/')) {
+            absoluteLink = baseUrl + trimmed;
+        } else {
+            absoluteLink = currentFolderPath + trimmed;
+        }
 
         if (swapKey && absoluteLink.includes(swapKey)) {
             absoluteLink = absoluteLink.replace(swapKey, swapVal);
@@ -295,6 +308,7 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
+        // تشفير الرابط والـ headers المخصصة لكل قطعة (.js أو .ts)
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
@@ -424,7 +438,6 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
-// مسار التشغيل المُعدّل بناءً على طلبك
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -432,20 +445,16 @@ app.get('/play/:hash', async (req, res) => {
         if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
 
         const matchInfo = await getMatchInfo(realChannel);
+        if (!matchInfo.isAvailable) return res.send(generateOfflineUI(matchInfo.reason));
+
+        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `https://${req.get('host')}`;
-
-        // إذا لم تكن المباراة في الـ API، نرسل حالة انتهت
-        if (!matchInfo.isAvailable) {
-            return res.send(generateUI(hash, [], secureToken, matchInfo.title, hostUrl, 'ended'));
-        }
-
-        // إذا كانت جارية أو لم تبدأ، نجلب السيرفرات كالمعتاد
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl, 'live')); 
+        
+        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
     } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً، يرجى المحاولة لاحقاً.'));
+        res.send(generateOfflineUI('البث غير متوفر حالياً'));
     }
 });
 
@@ -483,9 +492,9 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
 });
 
 // ==========================================
-// الواجهة وتجربة المشغل الذكية (تم إضافة شاشة النهاية داخل المشغل)
+// الواجهة وتجربة المشغل الذكية
 // ==========================================
-function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matchStatus = 'live') {
+function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
     const totalServers = servers.length;
     const embedUrl = `${hostUrl}/play/${channelHash}`;
 
@@ -516,40 +525,53 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         body, html { height: 100%; width: 100%; background-color: #000; font-family: 'Tajawal', sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; }
         
         .player-container {
-            position: relative; width: 100%; height: 100%; max-width: 1200px; max-height: 800px;
-            background-color: #000; overflow: hidden; cursor: default;
-            user-select: none; -webkit-user-select: none;
+            position: relative;
+            width: 100%;
+            height: 100%;
+            max-width: 1200px;
+            max-height: 800px;
+            background-color: #000;
+            overflow: hidden;
+            cursor: default;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         .loading-overlay {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px);
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            z-index: 25; transition: opacity 0.3s ease;
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 25;
+            transition: opacity 0.3s ease;
         }
         .spinner { width: 50px; height: 50px; border: 4px solid rgba(255, 255, 255, 0.1); border-top: 4px solid #5c4dff; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
         .loading-text { color: #fff; font-size: 15px; font-weight: 500; letter-spacing: 0.5px; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
-        /* شاشة نهاية المباراة داخل المشغل */
-        .ended-overlay {
-            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: radial-gradient(circle at center, #1a1c29 0%, #000000 100%);
-            z-index: 20; flex-direction: column; justify-content: center; align-items: center; text-align: center;
-        }
-        .ended-icon { width: 72px; height: 72px; fill: #ff3b30; margin-bottom: 20px; filter: drop-shadow(0 0 10px rgba(255,59,48,0.5)); }
-        .ended-title { color: #fff; font-size: 28px; font-weight: 800; margin-bottom: 10px; }
-        .ended-desc { color: #9ca3af; font-size: 16px; font-weight: 500; max-width: 80%; }
-
         #video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; z-index: 2; }
 
         .glass-bar {
-            position: absolute; left: 50%; transform: translateX(-50%); z-index: 30;
-            height: 58px; background: rgba(20, 22, 32, 0.78); backdrop-filter: blur(14px);
-            -webkit-backdrop-filter: blur(14px); border-radius: 14px;
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 0 24px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.08); transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            height: 58px;
+            background: rgba(20, 22, 32, 0.78);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            transition: opacity 0.4s ease, transform 0.4s ease, display 0.2s ease;
         }
 
         .glass-bar.title-bar { width: 95%; max-width: 980px; height: 68px; top: 25px; }
@@ -618,17 +640,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
 <body>
 
     <div class="player-container" id="playerContainer">
-        
         <div id="loadingOverlay" class="loading-overlay">
             <div class="spinner"></div>
             <div class="loading-text">جاري الاتصال بالبث المباشر...</div>
-        </div>
-
-        <!-- شاشة نهاية المباراة المدمجة داخل المشغل -->
-        <div id="endedOverlay" class="ended-overlay">
-            <svg class="ended-icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-            <h2 class="ended-title">انتهت المباراة</h2>
-            <p class="ended-desc">لا يوجد بث متاح حالياً لهذه المباراة.</p>
         </div>
 
         <video id="video" playsinline webkit-playsinline autoplay muted></video>
@@ -712,15 +726,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         const video = document.getElementById('video');
         const playerContainer = document.getElementById('playerContainer');
         const loadingOverlay = document.getElementById('loadingOverlay');
-        const endedOverlay = document.getElementById('endedOverlay');
-        const controlsBar = document.getElementById('controlsBar');
-        const settingsBtn = document.getElementById('settingsBtn');
+        const titleBar = document.getElementById('titleBar');
         let hls = null;
         
         let currentToken = '${secureToken}';
         const channelHash = '${channelHash}';
         const totalServers = ${totalServers};
-        const matchStatus = '${matchStatus}';
         
         let currentServerIndex = 0;
         let isPlaying = true;
@@ -731,7 +742,9 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
             try {
                 const response = await fetch('/api/refresh-token');
                 const data = await response.json();
-                if (data && data.token) currentToken = data.token;
+                if (data && data.token) {
+                    currentToken = data.token;
+                }
             } catch (e) {}
         }, 8 * 60 * 1000);
 
@@ -743,13 +756,13 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
         const closeEmbedModal = document.getElementById('closeEmbedModal');
         const embedCodeArea = document.getElementById('embedCodeArea');
         const copyEmbedBtn = document.getElementById('copyEmbedBtn');
+        const settingsBtn = document.getElementById('settingsBtn');
         const serverPopup = document.getElementById('serverPopup');
         const closeServerPopup = document.getElementById('closeServerPopup');
         const fullscreenBtn = document.getElementById('fullscreenBtn');
 
         let inactivityTimeout;
         function resetInactivityTimer() {
-            if (matchStatus === 'ended') return;
             playerContainer.classList.remove('hide-ui');
             clearTimeout(inactivityTimeout);
             inactivityTimeout = setTimeout(() => {
@@ -785,48 +798,36 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
 
         function attemptPlay() {
             video.play().then(() => {
-                video.muted = false; hideLoading(); isPlaying = true; updatePlayPauseUI();
+                video.muted = false;
+                hideLoading();
+                isPlaying = true;
+                updatePlayPauseUI();
             }).catch(() => {
                 video.muted = true;
-                video.play().then(() => { hideLoading(); isPlaying = true; updatePlayPauseUI(); }).catch(() => { hideLoading(); });
-            });
-        }
-
-        function initializePlayer(url) {
-            if (hls) { hls.destroy(); hls = null; }
-            if (Hls.isSupported()) {
-                hls = new Hls({ 
-                    enableWorker: true, lowLatencyMode: true, backBufferLength: 15,
-                    maxBufferLength: 10, maxMaxBufferLength: 20
-                }); 
-                hls.loadSource(url); 
-                hls.attachMedia(video);
-                hls.on(Hls.Events.MANIFEST_PARSED, attemptPlay);
-                hls.on(Hls.Events.ERROR, function (event, data) {
-                    if (data.fatal) {
-                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-                        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-                        else if (autoSwitchEnabled && totalServers > 1) {
-                            changeServer((currentServerIndex + 1) % totalServers, false);
-                        }
-                    }
+                video.play().then(() => {
+                    hideLoading();
+                    isPlaying = true;
+                    updatePlayPauseUI();
+                }).catch(() => {
+                    hideLoading();
                 });
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = url; 
-                video.addEventListener('loadedmetadata', attemptPlay);
-            }
+            });
         }
 
         function changeServer(serverIndex, isManual = false) {
             currentServerIndex = parseInt(serverIndex);
             showLoading('جاري الاتصال بالسيرفر ' + (currentServerIndex + 1) + '...');
+            
             if (isManual) autoSwitchEnabled = false;
 
             if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
             loadWatchdogTimer = setTimeout(() => {
                 if (autoSwitchEnabled && totalServers > 1) {
-                    changeServer((currentServerIndex + 1) % totalServers, false);
-                } else { hideLoading(); }
+                    let nextServer = (currentServerIndex + 1) % totalServers;
+                    changeServer(nextServer, false);
+                } else {
+                    hideLoading();
+                }
             }, 6000);
 
             document.querySelectorAll('.server-item').forEach((item, idx) => {
@@ -835,34 +836,80 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl, matc
             });
 
             const manifestUrl = '/manifest/' + channelHash + '/' + currentServerIndex + '?token=' + encodeURIComponent(currentToken);
-            initializePlayer(manifestUrl);
+            if (hls) { hls.destroy(); hls = null; }
+            
+            if (Hls.isSupported()) {
+                hls = new Hls({ 
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    backBufferLength: 15,
+                    maxBufferLength: 10,
+                    maxMaxBufferLength: 20,
+                    manifestLoadingTimeOut: 5000,
+                    levelLoadingTimeOut: 5000,
+                    fragLoadingTimeOut: 6000,
+                    liveSyncDurationCount: 2,
+                    liveMaxLatencyDurationCount: 5,
+                    maxLiveSyncPlaybackRate: 1.1
+                }); 
+
+                hls.loadSource(manifestUrl); 
+                hls.attachMedia(video);
+                
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    attemptPlay();
+                });
+
+                hls.on(Hls.Events.ERROR, function (event, data) {
+                    if (data.fatal) {
+                        switch (data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                hls.startLoad();
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                hls.recoverMediaError();
+                                break;
+                            default:
+                                if (autoSwitchEnabled && totalServers > 1) {
+                                    let nextServer = (currentServerIndex + 1) % totalServers;
+                                    changeServer(nextServer, false); 
+                                } else {
+                                    hideLoading();
+                                }
+                                break;
+                        }
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = manifestUrl; 
+                video.addEventListener('loadedmetadata', () => {
+                    attemptPlay();
+                });
+            }
             serverPopup.style.display = 'none';
         }
 
-        video.addEventListener('stalled', () => { if (hls) hls.startLoad(); });
+        video.addEventListener('stalled', () => {
+            if (hls) hls.startLoad();
+        });
+        
         video.addEventListener('waiting', () => {
-            if (hls && video.currentTime > 0 && video.buffered.length > 0) {
-                video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
+            if (hls && video.currentTime > 0) {
+                if (video.buffered.length > 0) {
+                    video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
+                }
             }
         });
 
-        // ===================================
-        // المعالجة الذكية لحالة المباراة
-        // ===================================
-        if (matchStatus === 'ended' || totalServers === 0) {
-            // المباراة انتهت: نخفي شاشة التحميل وأزرار التحكم ونظهر رسالة الانتهاء بتصميم المشغل
-            loadingOverlay.style.display = 'none';
-            controlsBar.style.display = 'none';
-            endedOverlay.style.display = 'flex';
-        } else {
-            // المباراة لم تبدأ أو جارية: نقوم بتشغيل السيرفرات القادمة من الـ API بشكل طبيعي
-            changeServer(0, false);
-        }
-        // ===================================
+        changeServer(0, false);
 
         playPauseBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            if (video.paused) video.play(); else video.pause();
+            if (video.paused) {
+                video.play();
+            } else {
+                video.pause();
+            }
         });
 
         video.addEventListener('play', () => { isPlaying = true; updatePlayPauseUI(); resetInactivityTimer(); });
@@ -903,22 +950,53 @@ function generateOfflineUI(reasonMsg) {
     <title>البث غير متوفر</title>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
-        body { margin: 0; padding: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Tajawal', sans-serif; }
-        .container { text-align: center; background: rgba(20,22,35,0.7); padding: 50px; border-radius: 20px; border: 1px solid rgba(255, 255, 255, 0.1); width: 90%; max-width: 500px; }
-        h2 { color: #fff; margin-bottom: 12px; font-size: 26px; }
+        body { 
+            margin: 0; padding: 0; 
+            background: #000 url('https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1920&q=80') center/cover no-repeat; 
+            display: flex; justify-content: center; align-items: center; 
+            height: 100vh; font-family: 'Tajawal', sans-serif; 
+        }
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 12, 16, 0.88); z-index: 1; }
+        .container { 
+            position: relative; z-index: 2; text-align: center; 
+            background: rgba(20,22,35,0.7); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            padding: 50px 40px; border-radius: 20px; 
+            border: 1px solid rgba(255, 255, 255, 0.1); 
+            box-shadow: 0 30px 60px rgba(0,0,0,0.8); width: 90%; max-width: 500px; 
+        }
+        .icon-container { display: flex; justify-content: center; margin-bottom: 20px; }
+        .icon { width: 65px; height: 65px; fill: #5c4dff; animation: pulse 2s infinite ease-in-out; }
+        @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }
+        h2 { color: #fff; margin-bottom: 12px; font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }
         .reason { color: #f59e0b; font-size: 18px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 6px 16px; border-radius: 8px; }
-        .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; }
-        .btn { display: inline-block; background: linear-gradient(135deg, #5c4dff, #4a3be0); color: #fff; padding: 14px 34px; text-decoration: none; border-radius: 50px; font-weight: 700; }
+        .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; font-weight: 500; }
+        .btn { 
+            display: inline-block; background: linear-gradient(135deg, #5c4dff, #4a3be0); 
+            color: #fff; padding: 14px 34px; text-decoration: none; font-size: 16px; 
+            font-weight: 700; border-radius: 50px; transition: all 0.3s ease; 
+            box-shadow: 0 4px 15px rgba(92, 77, 255, 0.4); 
+        }
+        .btn:hover { transform: translateY(-3px); box-shadow: 0 8px 25px rgba(92, 77, 255, 0.6); }
+        .refresh-text { margin-top: 20px; font-size: 13px; color: #6b7280; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 6px; }
+        .refresh-dot { width: 8px; height: 8px; background-color: #10b981; border-radius: 50%; box-shadow: 0 0 8px rgba(16, 185, 129, 0.6); animation: blink 1.5s infinite; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     </style>
 </head>
 <body>
+    <div class="overlay"></div>
     <div class="container">
+        <div class="icon-container">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+        </div>
         <h2>عفواً، البث غير متاح حالياً</h2>
         <div class="reason">${reasonMsg}</div>
-        <div class="message">يرجى البقاء في هذه الصفحة، سيبدأ البث التلقائي فور بدء الحدث!</div>
+        <div class="message">لم تبدأ المباراة بعد، أو تم إيقاف البث مؤقتاً.<br>يرجى البقاء في هذه الصفحة، سيبدأ البث التلقائي فور بدء الحدث!</div>
         <a href="${CONFIG.MAIN_WEBSITE}" target="_blank" class="btn">العودة للموقع الرسمي</a>
+        <div class="refresh-text"><div class="refresh-dot"></div> سيتم تحديث الصفحة تلقائياً للتحقق من البث</div>
     </div>
-    <script>setTimeout(() => { location.reload(); }, 45 * 1000);</script>
+    <script>
+        setTimeout(() => { location.reload(); }, 45 * 1000);
+    </script>
 </body>
 </html>`;
 }
