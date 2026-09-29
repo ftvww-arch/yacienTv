@@ -186,11 +186,12 @@ async function getMatchInfo(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
+        // السماح بالبث حتى لو لم تبدأ المباراة أو لم تكن مدرجة في الجدول
+        if (!targetMatch) return { isAvailable: true, title: realChannelName };
         
         const channelField = targetMatch.channel || targetMatch.id_live;
         if (!channelField || channelField.trim() === '') {
-            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
+            return { isAvailable: true, title: realChannelName };
         }
 
         let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
@@ -241,10 +242,17 @@ async function fetchChannelServers(realChannelName) {
         try {
             let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
             let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
+            
+            // استخراج وتعيين User-Agent إن وُجد في الـ agent property ولم يكن بالترويسات
+            let customHeaders = innerData.headers || {};
+            if (innerData.agent && !customHeaders['User-Agent'] && !customHeaders['user-agent']) {
+                customHeaders['User-Agent'] = innerData.agent;
+            }
+
             servers.push({ 
                 name: srv.name || `سيرفر ${i + 1}`, 
                 url: innerData.url, 
-                headers: innerData.headers || {}, 
+                headers: customHeaders, 
                 swap: innerData.swap || null 
             });
         } catch (e) {}
@@ -264,7 +272,9 @@ async function fetchManifest(serverInfo, hostUrl) {
     
     if (serverInfo.headers) {
         Object.keys(serverInfo.headers).forEach(key => {
-            if (key.toLowerCase() !== 'host') {
+            const lowerKey = key.toLowerCase();
+            // إزالة الترويسات التي تفسد البروكسي عند تمريرها
+            if (lowerKey !== 'host' && lowerKey !== 'accept-encoding') {
                 headers[key] = serverInfo.headers[key];
             }
         });
@@ -286,20 +296,30 @@ async function fetchManifest(serverInfo, hostUrl) {
         let trimmed = line.trim().replace(/\r/g, '').replace(/\\$/g, '');
         if (!trimmed || trimmed.startsWith('#')) return trimmed;
 
-        let absoluteLink = trimmed.startsWith('http') ? trimmed 
-                         : trimmed.startsWith('/') ? baseUrl + trimmed 
-                         : new URL(trimmed, finalUrl).href;
+        let absoluteLink;
+        // عدم تمرير Query Params للروابط المطلقة التي تنتهي بصيغ مختلفة (كـ .js)
+        if (trimmed.startsWith('http')) {
+            absoluteLink = trimmed; 
+        } else if (trimmed.startsWith('/')) {
+            absoluteLink = baseUrl + trimmed;
+            if (finalSearchParams && !absoluteLink.includes('?')) absoluteLink += finalSearchParams;
+        } else {
+            absoluteLink = new URL(trimmed, finalUrl).href;
+            if (finalSearchParams && !absoluteLink.includes('?')) absoluteLink += finalSearchParams;
+        }
 
         if (swapKey && absoluteLink.includes(swapKey)) {
             absoluteLink = absoluteLink.replace(swapKey, swapVal);
         }
 
-        if (finalSearchParams && !absoluteLink.includes('?')) {
-            absoluteLink += finalSearchParams;
-        }
+        let segmentHeaders = { ...headers };
+        // ضمان عدم وجود Host أو Accept-Encoding ليتكفل به Axios بحرية تامة للأجزاء المنفصلة
+        delete segmentHeaders['Host'];
+        delete segmentHeaders['host'];
+        delete segmentHeaders['Accept-Encoding'];
+        delete segmentHeaders['accept-encoding'];
 
-        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
-        const payload = JSON.stringify({ url: absoluteLink, headers });
+        const payload = JSON.stringify({ url: absoluteLink, headers: segmentHeaders });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
     });
@@ -343,6 +363,12 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
             'Origin': customHeaders['Origin'] || parsedUrl.origin,
             ...customHeaders
         };
+
+        // إزالة صارمة للـ Host والـ Encoding لمنع جلب بيانات GZIP تالفة أو رفض الـ CDN
+        delete headers['Host'];
+        delete headers['host'];
+        delete headers['Accept-Encoding'];
+        delete headers['accept-encoding'];
 
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
