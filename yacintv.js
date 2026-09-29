@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 // الإعدادات العامة والتشفير
 // ==========================================
 const CONFIG = {
-    API_BASE_URL: 'https://ideal-spirit-production-4eeb.up.railway.app/yacintv',
+    API_BASE_URL: 'https://api.kirozozo.xyz/ytvplus',
     TV_CHANNELS_BASE_URL: 'https://raw.githubusercontent.com/sspc11122020-hub/getChanelFraom_dlstreams/refs/heads/main/Bein%20sport%20Ar/',
     CACHE_DURATION: 300000, 
     MANIFEST_CACHE: 2000,    
