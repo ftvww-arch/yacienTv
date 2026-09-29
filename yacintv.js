@@ -997,4 +997,6 @@ function generateOfflineUI(reasonMsg) {
 </html>`;
 }
 
-module.exports = app;
+app.listen(PORT, () => {
+    console.log(`🚀 Ultra Secure High-Performance Player running on port ${PORT}`);
+});
