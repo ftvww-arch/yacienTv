@@ -177,6 +177,7 @@ async function getMatchInfo(realChannelName) {
         }
     }
 
+    // السماح بدخول القناة دائماً بدون التعليق على رسالة "غير متاحة"
     try {
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -193,6 +194,7 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
+    // قنوات الساتلايت
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
@@ -206,6 +208,7 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
+    // تجهيز الـ ID بدون تكرار live_tv_
     let targetId = realChannelName;
     if (!targetId.startsWith('live_tv_') && !targetId.startsWith('sport_') && !targetId.startsWith('panel_')) {
         targetId = `live_tv_${targetId}`;
@@ -213,6 +216,7 @@ async function fetchChannelServers(realChannelName) {
 
     let dataArray = null;
 
+    // 1. المحاولة الأولى: /stream?id_live=...
     try {
         const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { 
             params: { id_live: targetId }, 
@@ -224,6 +228,7 @@ async function fetchChannelServers(realChannelName) {
         }
     } catch (e) {}
 
+    // 2. المحاولة الثانية (إذا فشل الأول أو رجع فارغ): /last/id_live
     if (!dataArray || dataArray.length === 0) {
         try {
             const response2 = await axios.get(`${CONFIG.API_BASE_URL}/last/${targetId}`, { 
@@ -243,6 +248,7 @@ async function fetchChannelServers(realChannelName) {
         if (!srv.data) return;
         try {
             let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
+            // تجاهل السيرفرات الفارغة التي قيمتها ليست JSON أو رابط
             if (!rawUrl || rawUrl === "2" || rawUrl.length < 5) return;
 
             let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
@@ -257,15 +263,20 @@ async function fetchChannelServers(realChannelName) {
         } catch (e) {}
     });
 
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات شغالة حالياً');
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات شغال حالياً');
     return servers;
 }
 
 async function fetchManifest(serverInfo, hostUrl) {
+    const parsedTarget = new URL(serverInfo.url);
+    
+    // دمج الترويسات المطلوبة بدقة مع إعطاء الأولوية للـ User-Agent الخاص بالسيرفر (مثل OSCARTV2021)
     const serverHeaders = serverInfo.headers || {};
     const headers = { 
         'User-Agent': serverHeaders['User-Agent'] || serverHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
         'Accept': '*/*',
+        'Referer': serverHeaders['Referer'] || `${parsedTarget.origin}/`,
+        'Origin': serverHeaders['Origin'] || parsedTarget.origin,
         ...serverHeaders
     };
 
@@ -274,13 +285,8 @@ async function fetchManifest(serverInfo, hostUrl) {
     
     const finalUrl = response.request.res.responseUrl || serverInfo.url;
     const parsedFinalUrl = new URL(finalUrl);
-    
-    // مطابقة منطق كود الجافا في حساب المسار النسبي ومجلد الملف
     const baseUrl = parsedFinalUrl.origin;
-    const pathName = parsedFinalUrl.pathname;
-    const parentPath = pathName.includes('/') ? pathName.substring(0, pathName.lastIndexOf('/') + 1) : '/';
-    const folderUrl = baseUrl + parentPath;
-    const searchParams = parsedFinalUrl.search || '';
+    const finalSearchParams = parsedFinalUrl.search;
 
     const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
     const swapVal = swapKey ? serverInfo.swap[swapKey] : null;
@@ -290,31 +296,29 @@ async function fetchManifest(serverInfo, hostUrl) {
         let trimmed = line.trim().replace(/\r/g, '').replace(/\\$/g, '');
         if (!trimmed || trimmed.startsWith('#')) return trimmed;
 
-        let absoluteLink = '';
-        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-            absoluteLink = trimmed;
-        } else if (trimmed.startsWith('/')) {
-            absoluteLink = baseUrl + trimmed;
-        } else {
-            absoluteLink = folderUrl + trimmed;
-        }
+        let absoluteLink = trimmed.startsWith('http') ? trimmed 
+                         : trimmed.startsWith('/') ? baseUrl + trimmed 
+                         : new URL(trimmed, finalUrl).href;
 
-        if (swapKey && swapVal && absoluteLink.includes(swapKey)) {
+        if (swapKey && absoluteLink.includes(swapKey)) {
             absoluteLink = absoluteLink.replace(swapKey, swapVal);
         }
 
-        if (searchParams && !absoluteLink.includes('?')) {
-            absoluteLink += searchParams;
+        if (finalSearchParams && !absoluteLink.includes('?')) {
+            absoluteLink += finalSearchParams;
         }
 
+        // تشفير الرابط مع الترويسات الخاصة بالسيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
-        return `${hostUrl}/s/${encryptedSegment}`;
+        
+        // الحفاظ على مرونة الرابط المشفّر لتشغيل أجزاء الـ .js والـ .ts بدون مشاكل
+return `${hostUrl}/s/${encryptedSegment}`;
+    
     });
 
     return rewrittenLines.join('\n');
 }
-
 // ==========================================
 // المسارات (Routes)
 // ==========================================
@@ -334,11 +338,30 @@ app.get('/s/:encodedUrl*', async (req, res) => {
         targetUrl = decrypted;
     }
 
+    const referer = (req.headers['referer'] || req.headers['origin'] || '').toLowerCase();
+    const host = req.get('host') || '';
+    const mainHost = new URL(CONFIG.MAIN_WEBSITE).hostname;
+
+    if (referer && !referer.includes(host) && !referer.includes(mainHost)) {
+        return res.status(403).send('Access Denied');
+    }
+
     try {
-        const headers = { ...customHeaders };
-        
-        // إلغاء التشفير المضغوط مثل كود الجافا لحماية مقاطع الفيديو المموّهة
+        const parsedUrl = new URL(targetUrl);
+        const headers = {
+            'User-Agent': customHeaders['User-Agent'] || customHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
+            'Accept': '*/*',
+            'Referer': customHeaders['Referer'] || `${parsedUrl.origin}/`,
+            'Origin': customHeaders['Origin'] || parsedUrl.origin,
+            ...customHeaders
+        };
+
+        // ضبط Accept-Encoding كـ identity لمنع التعارض في الجلب الشبيه بكود الجافا
         headers['Accept-Encoding'] = 'identity';
+
+        if (req.headers.range) {
+            headers['Range'] = req.headers.range;
+        }
 
         const response = await axios.get(targetUrl, {
             headers,
@@ -347,10 +370,16 @@ app.get('/s/:encodedUrl*', async (req, res) => {
             validateStatus: status => status >= 200 && status < 500
         });
 
-        // إرجاع Header ثابت video/MP2T تماماً كما في الجافا
+        // إجبار المخرجات على صيغة video/MP2T ليتعرف عليها مشغل Web (Hls.js) مباشرة بدون رفض الامتداد .js
         res.setHeader('Content-Type', 'video/MP2T');
+        res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
+        res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
+
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
+        }
 
         res.status(response.status);
         response.data.pipe(res);
@@ -358,6 +387,7 @@ app.get('/s/:encodedUrl*', async (req, res) => {
         res.status(500).send('Proxy Segment Error');
     }
 });
+
 
 app.get('/api/matches', async (req, res) => {
     try {
@@ -652,7 +682,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
             <div class="right-controls">
                 <button class="control-icon-btn" id="embedBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M8.293 6.293a1 1 0 0 1 1.414 0L14.414 11H19a1 1 0 0 1 0 2h-4.586l-4.707 4.707a1 1 0 0 1-1.414-1.414L11.586 13H5a1 1 0 0 1 0-2h6.586L8.293 7.707a1 1 0 0 1 0-1.414z"/><path d="M19 19a1 1 0 1 1-2 0V5a1 1 0 0 1 2 0v14z"/></svg></button>
-                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6-3.6 3.6z"/></svg></button>
+                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>
                 <button class="control-icon-btn" id="fullscreenBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
             </div>
         </div>
