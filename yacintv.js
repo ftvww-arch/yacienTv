@@ -164,10 +164,6 @@ setInterval(() => {
 // جلب معلومات القنوات والسيرفرات
 // ==========================================
 async function getMatchInfo(realChannelName) {
-    if (realChannelName.startsWith('http://') || realChannelName.startsWith('https://')) {
-        return { isAvailable: true, title: 'بث مباشر' };
-    }
-
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         try {
@@ -190,12 +186,16 @@ async function getMatchInfo(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        let matchTitle = realChannelName;
-        if (targetMatch) {
-            matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
-            if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
-                matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
-            }
+        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
+        
+        const channelField = targetMatch.channel || targetMatch.id_live;
+        if (!channelField || channelField.trim() === '') {
+            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
+        }
+
+        let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
+        if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
+            matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
         }
 
         return { isAvailable: true, title: matchTitle };
@@ -205,16 +205,6 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
-    // دعم مباشر للروابط المستقلة وسيرفرات .css / .m3u8 المباشرة دون الاستعلام من API
-    if (realChannelName.startsWith('http://') || realChannelName.startsWith('https://')) {
-        return [{
-            name: 'سيرفر رئيسي',
-            url: realChannelName,
-            headers: {},
-            swap: null
-        }];
-    }
-
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
@@ -285,12 +275,7 @@ async function fetchManifest(serverInfo, hostUrl) {
     
     const finalUrl = response.request.res.responseUrl || serverInfo.url;
     const parsedFinalUrl = new URL(finalUrl);
-
     const baseUrl = parsedFinalUrl.origin;
-    const pathSegments = parsedFinalUrl.pathname.split('/');
-    pathSegments.pop();
-    const currentFolderPath = baseUrl + pathSegments.join('/') + '/';
-
     const finalSearchParams = parsedFinalUrl.search;
 
     const swapKey = serverInfo.swap ? Object.keys(serverInfo.swap)[0] : null;
@@ -301,14 +286,9 @@ async function fetchManifest(serverInfo, hostUrl) {
         let trimmed = line.trim().replace(/\r/g, '').replace(/\\$/g, '');
         if (!trimmed || trimmed.startsWith('#')) return trimmed;
 
-        let absoluteLink = '';
-        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-            absoluteLink = trimmed;
-        } else if (trimmed.startsWith('/')) {
-            absoluteLink = baseUrl + trimmed;
-        } else {
-            absoluteLink = currentFolderPath + trimmed;
-        }
+        let absoluteLink = trimmed.startsWith('http') ? trimmed 
+                         : trimmed.startsWith('/') ? baseUrl + trimmed 
+                         : new URL(trimmed, finalUrl).href;
 
         if (swapKey && absoluteLink.includes(swapKey)) {
             absoluteLink = absoluteLink.replace(swapKey, swapVal);
@@ -318,6 +298,7 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
+        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
@@ -454,25 +435,14 @@ app.get('/play/:hash', async (req, res) => {
         if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
 
         const matchInfo = await getMatchInfo(realChannel);
-        
-        let servers = [];
-        try {
-            servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        } catch (e) {
-            if (realChannel.startsWith('http://') || realChannel.startsWith('https://')) {
-                servers = [{ name: 'سيرفر رئيسي', url: realChannel, headers: {}, swap: null }];
-            }
-        }
+        if (!matchInfo.isAvailable) return res.send(generateOfflineUI(matchInfo.reason));
 
-        if (!servers || servers.length === 0) {
-            return res.send(generateOfflineUI('البث غير متوفر حالياً'));
-        }
-
+        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `https://${req.get('host')}`;
         
-        return res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
+        res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
     } catch (error) {
         res.send(generateOfflineUI('البث غير متوفر حالياً'));
     }
@@ -496,19 +466,9 @@ app.get('/manifest/:hash/:serverIndex', async (req, res) => {
         const { hash, serverIndex } = req.params;
         const realChannel = decodeId(hash);
         const cacheKey = `manifest_${realChannel}_${serverIndex}`;
-        
-        let servers = [];
-        try {
-            servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
-        } catch (e) {
-            if (realChannel.startsWith('http://') || realChannel.startsWith('https://')) {
-                servers = [{ name: 'سيرفر رئيسي', url: realChannel, headers: {}, swap: null }];
-            }
-        }
-
+        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const serverInfo = servers[parseInt(serverIndex)];
-        if (!serverInfo) return res.status(404).send('Server Not Found');
-
+        
         const hostUrl = `https://${req.get('host')}`;
         const manifestData = await CacheEngine.getOrFetch(cacheKey, () => fetchManifest(serverInfo, hostUrl), CONFIG.MANIFEST_CACHE);
 
@@ -767,6 +727,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
         let isPlaying = true;
         let autoSwitchEnabled = true; 
         let loadWatchdogTimer = null;
+        let stallRecoveryCount = 0;
 
         setInterval(async () => {
             try {
@@ -833,6 +794,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 isPlaying = true;
                 updatePlayPauseUI();
             }).catch(() => {
+                // Autoplay Policy Fallback: تشغيل بدون صوت فوراً لتفادي التعليق
                 video.muted = true;
                 video.play().then(() => {
                     hideLoading();
@@ -851,6 +813,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (isManual) autoSwitchEnabled = false;
 
             if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
+            // مؤقت حماية: إذا علّق السيرفر لأكثر من 6 ثوانٍ، يتم التحويل فوراً للسيرفر التالي
             loadWatchdogTimer = setTimeout(() => {
                 if (autoSwitchEnabled && totalServers > 1) {
                     let nextServer = (currentServerIndex + 1) % totalServers;
@@ -890,6 +853,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     attemptPlay();
                 });
 
+                // معالج الذكاء السريع عند حدوث تقطيع أو تعليق البث (Stalling Auto-Recovery)
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
                         switch (data.type) {
@@ -919,12 +883,14 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             serverPopup.style.display = 'none';
         }
 
+        // إنعاش البث عند حدوث التجمّد (Stall Monitor) بدون أن يشعر المستخدم ببطء
         video.addEventListener('stalled', () => {
             if (hls) hls.startLoad();
         });
         
         video.addEventListener('waiting', () => {
             if (hls && video.currentTime > 0) {
+                // قفزة تلقائية للنقطة الحية المباشرة في حال التعليق
                 if (video.buffered.length > 0) {
                     video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
                 }
