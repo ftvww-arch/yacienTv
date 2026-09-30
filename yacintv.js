@@ -184,14 +184,18 @@ async function getMatchInfo(realChannelName) {
         }, 60000);
 
         const channelId = `live_tv_${realChannelName}`;
-        const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
+     const targetMatch = matches.find(m => m.id_live === channelId);
 
-        let matchTitle = realChannelName;
-        if (targetMatch) {
-            matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
-            if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
-                matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
-            }
+if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
+
+const channelField = targetMatch.id_live;
+        if (!channelField || channelField.trim() === '') {
+            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
+        }
+
+        let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
+        if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
+            matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
         }
 
         return { isAvailable: true, title: matchTitle };
@@ -201,17 +205,10 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
-    console.log(`[DEBUG] Fetching servers for: ${realChannelName}`);
-    
-    // 1. معالجة قنوات القمر الصناعي (sat_)
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
-        const jsonUrl = `${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`;
-        const res = await axios.get(jsonUrl, { timeout: 8000 });
-        
-        if (!res.data || !res.data.servers || res.data.servers.length === 0) {
-            throw new Error(`القناة الفضائية ${channelId} لا تحتوي على سيرفرات`);
-        }
+        const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
+        if (!res.data || !res.data.servers || res.data.servers.length === 0) throw new Error('لا توجد بيانات بالقناة');
         
         return res.data.servers.map((srv, i) => ({
             name: srv.serverName || `سيرفر ${i + 1}`,
@@ -221,81 +218,38 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
-    // 2. تجهيز معرف القناة
-    let cleanId = realChannelName;
-    if (cleanId.startsWith('live_tv_')) cleanId = cleanId.replace('live_tv_', '');
-    const channelId = `live_tv_${cleanId}`;
+    const channelId = `live_tv_${realChannelName}`;
+    let dataArray = null;
 
-    let dataArray = [];
-
-    // المحاولة الأولى: عبر مسار /stream
     try {
-        const urlStream = `${CONFIG.API_BASE_URL}/stream`;
-        console.log(`[DEBUG] Requesting: ${urlStream}?id_live=${channelId}`);
-        const res1 = await axios.get(urlStream, { 
-            params: { id_live: channelId }, 
-            headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, 
-            timeout: 8000 
-        });
+        const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { params: { id_live: channelId }, headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, timeout: 8000 });
+        if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
+    } catch (e) {}
 
-        if (res1.data && Array.isArray(res1.data) && res1.data.length > 0) {
-            dataArray = res1.data;
-        }
-    } catch (e) {
-        console.error(`[DEBUG] /stream failed: ${e.message}`);
-    }
-
-    // المحاولة الثانية: عبر مسار /last (في حال كان /stream فارغاً أو فشل)
     if (!dataArray || dataArray.length === 0) {
         try {
-            const urlLast = `${CONFIG.API_BASE_URL}/last/${channelId}`;
-            console.log(`[DEBUG] Requesting fallback: ${urlLast}`);
-            const res2 = await axios.get(urlLast, { 
-                headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, 
-                timeout: 8000 
-            });
-
-            if (res2.data && res2.data.data) {
-                dataArray = [res2.data];
-            }
-        } catch (e) {
-            console.error(`[DEBUG] /last failed: ${e.message}`);
-        }
+            const response2 = await axios.get(`${CONFIG.API_BASE_URL}/live_id/${channelId}`, { headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, timeout: 8000 });
+            if (response2.data) dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
+        } catch (e) {}
     }
 
-    if (!dataArray || dataArray.length === 0) {
-        throw new Error(`لم يتم العثور على أي سيرفرات شغالة للقناة: ${channelId}`);
-    }
+    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات');
 
-    // 3. تحليل وتنظيف السيرفرات واستبعاد الفارغة
     const servers = [];
     dataArray.forEach((srv, i) => {
-        if (!srv.data || !srv.data.url) return;
-
+        if (srv.result !== 0 || !srv.data) return;
         try {
             let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
-            
-            if (rawUrl === "2" || rawUrl.length < 5) return;
-
             let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-
-            if (innerData.url && innerData.url.startsWith('http')) {
-                servers.push({
-                    name: srv.name || srv.data.name || `سيرفر ${servers.length + 1}`,
-                    url: innerData.url,
-                    headers: innerData.headers || {},
-                    swap: innerData.swap || null
-                });
-            }
-        } catch (e) {
-            console.error(`[DEBUG] Error parsing server ${i}: ${e.message}`);
-        }
+            servers.push({ 
+                name: srv.name || `سيرفر ${i + 1}`, 
+                url: innerData.url, 
+                headers: innerData.headers || {}, 
+                swap: innerData.swap || null 
+            });
+        } catch (e) {}
     });
-
-    if (servers.length === 0) {
-        throw new Error(`جميع السيرفرات المرجعة من الـ API لهذه القناة مغلقة أو غير صالحة حالياً`);
-    }
-
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات');
     return servers;
 }
 
@@ -344,6 +298,7 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
+        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
@@ -477,32 +432,19 @@ app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
         const realChannel = decodeId(hash);
-        console.log(`\n========================================`);
-        console.log(`[REQUEST] /play/${hash} -> Decoded Channel: ${realChannel}`);
-
-        if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح (Decryption failed)'));
+        if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
 
         const matchInfo = await getMatchInfo(realChannel);
-        
-        const servers = await fetchChannelServers(realChannel);
-        
+        if (!matchInfo.isAvailable) return res.send(generateOfflineUI(matchInfo.reason));
+
+        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `https://${req.get('host')}`;
         
         res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
     } catch (error) {
-        console.error(`[PLAY ERROR] ${error.message}`);
-        
-        if (req.query.debug === 'true') {
-            return res.status(500).json({
-                error: true,
-                message: error.message,
-                stack: error.stack
-            });
-        }
-        
-        res.send(generateOfflineUI(`خطأ النظام: ${error.message}`));
+        res.send(generateOfflineUI('البث غير متوفر حالياً'));
     }
 });
 
@@ -726,7 +668,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
             <div class="right-controls">
                 <button class="control-icon-btn" id="embedBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M8.293 6.293a1 1 0 0 1 1.414 0L14.414 11H19a1 1 0 0 1 0 2h-4.586l-4.707 4.707a1 1 0 0 1-1.414-1.414L11.586 13H5a1 1 0 0 1 0-2h6.586L8.293 7.707a1 1 0 0 1 0-1.414z"/><path d="M19 19a1 1 0 1 1-2 0V5a1 1 0 0 1 2 0v14z"/></svg></button>
-                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6-3.6z"/></svg></button>
+                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>
                 <button class="control-icon-btn" id="fullscreenBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
             </div>
         </div>
@@ -852,6 +794,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 isPlaying = true;
                 updatePlayPauseUI();
             }).catch(() => {
+                // Autoplay Policy Fallback: تشغيل بدون صوت فوراً لتفادي التعليق
                 video.muted = true;
                 video.play().then(() => {
                     hideLoading();
@@ -870,6 +813,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (isManual) autoSwitchEnabled = false;
 
             if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
+            // مؤقت حماية: إذا علّق السيرفر لأكثر من 6 ثوانٍ، يتم التحويل فوراً للسيرفر التالي
             loadWatchdogTimer = setTimeout(() => {
                 if (autoSwitchEnabled && totalServers > 1) {
                     let nextServer = (currentServerIndex + 1) % totalServers;
@@ -909,6 +853,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     attemptPlay();
                 });
 
+                // معالج الذكاء السريع عند حدوث تقطيع أو تعليق البث (Stalling Auto-Recovery)
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
                         switch (data.type) {
@@ -938,12 +883,14 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             serverPopup.style.display = 'none';
         }
 
+        // إنعاش البث عند حدوث التجمّد (Stall Monitor) بدون أن يشعر المستخدم ببطء
         video.addEventListener('stalled', () => {
             if (hls) hls.startLoad();
         });
         
         video.addEventListener('waiting', () => {
             if (hls && video.currentTime > 0) {
+                // قفزة تلقائية للنقطة الحية المباشرة في حال التعليق
                 if (video.buffered.length > 0) {
                     video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
                 }
@@ -1017,7 +964,7 @@ function generateOfflineUI(reasonMsg) {
         .icon { width: 65px; height: 65px; fill: #5c4dff; animation: pulse 2s infinite ease-in-out; }
         @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }
         h2 { color: #fff; margin-bottom: 12px; font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }
-        .reason { color: #f59e0b; font-size: 16px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 8px 16px; border-radius: 8px; word-break: break-word; }
+        .reason { color: #f59e0b; font-size: 18px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 6px 16px; border-radius: 8px; }
         .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; font-weight: 500; }
         .btn { 
             display: inline-block; background: linear-gradient(135deg, #5c4dff, #4a3be0); 
