@@ -177,7 +177,6 @@ async function getMatchInfo(realChannelName) {
         }
     }
 
-    // السماح بدخول القناة دائماً بدون التعليق على رسالة "غير متاحة"
     try {
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -194,7 +193,6 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
-    // قنوات الساتلايت
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
@@ -208,7 +206,6 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
-    // تجهيز الـ ID بدون تكرار live_tv_
     let targetId = realChannelName;
     if (!targetId.startsWith('live_tv_') && !targetId.startsWith('sport_') && !targetId.startsWith('panel_')) {
         targetId = `live_tv_${targetId}`;
@@ -216,7 +213,6 @@ async function fetchChannelServers(realChannelName) {
 
     let dataArray = null;
 
-    // 1. المحاولة الأولى: /stream?id_live=...
     try {
         const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { 
             params: { id_live: targetId }, 
@@ -228,7 +224,6 @@ async function fetchChannelServers(realChannelName) {
         }
     } catch (e) {}
 
-    // 2. المحاولة الثانية (إذا فشل الأول أو رجع فارغ): /last/id_live
     if (!dataArray || dataArray.length === 0) {
         try {
             const response2 = await axios.get(`${CONFIG.API_BASE_URL}/last/${targetId}`, { 
@@ -248,7 +243,6 @@ async function fetchChannelServers(realChannelName) {
         if (!srv.data) return;
         try {
             let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
-            // تجاهل السيرفرات الفارغة التي قيمتها ليست JSON أو رابط
             if (!rawUrl || rawUrl === "2" || rawUrl.length < 5) return;
 
             let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
@@ -263,26 +257,21 @@ async function fetchChannelServers(realChannelName) {
         } catch (e) {}
     });
 
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات شغال حالياً');
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات شغالة حالياً');
     return servers;
 }
 
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
-    const headers = { 
-        'User-Agent': serverInfo.headers['User-Agent'] || serverInfo.headers['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
-        'Accept': '*/*',
-        'Referer': `${parsedTarget.origin}/`,
-        'Origin': parsedTarget.origin
-    };
+    const serverHeaders = serverInfo.headers || {};
     
-    if (serverInfo.headers) {
-        Object.keys(serverInfo.headers).forEach(key => {
-            if (key.toLowerCase() !== 'host') {
-                headers[key] = serverInfo.headers[key];
-            }
-        });
-    }
+    const headers = { 
+        'User-Agent': serverHeaders['User-Agent'] || serverHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
+        'Accept': '*/*',
+        'Referer': serverHeaders['Referer'] || `${parsedTarget.origin}/`,
+        'Origin': serverHeaders['Origin'] || parsedTarget.origin,
+        ...serverHeaders
+    };
 
     const response = await axios.get(serverInfo.url, { headers, timeout: 10000 });
     let m3u8 = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
@@ -314,7 +303,7 @@ async function fetchManifest(serverInfo, hostUrl) {
 
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
-        return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
+        return `${hostUrl}/s/${encryptedSegment}/stream.ts`;
     });
 
     return rewrittenLines.join('\n');
@@ -324,7 +313,7 @@ async function fetchManifest(serverInfo, hostUrl) {
 // المسارات (Routes)
 // ==========================================
 
-app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
+app.get('/s/:encodedUrl/:filename', async (req, res) => {
     const decrypted = decryptUrl(req.params.encodedUrl);
     if (!decrypted) return res.status(403).send('Access Denied');
 
@@ -368,7 +357,7 @@ app.get('/s/:encodedUrl/segment.ts', async (req, res) => {
             validateStatus: status => status >= 200 && status < 500
         });
 
-        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
+        res.setHeader('Content-Type', 'video/mp2t');
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
