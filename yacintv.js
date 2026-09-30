@@ -313,7 +313,8 @@ async function fetchManifest(serverInfo, hostUrl) {
         const encryptedSegment = encryptUrl(payload);
         
         // الحفاظ على مرونة الرابط المشفّر لتشغيل أجزاء الـ .js والـ .ts بدون مشاكل
-        return `${hostUrl}/s/${encryptedSegment}/stream.ts`;
+return `${hostUrl}/s/${encryptedSegment}`;
+    
     });
 
     return rewrittenLines.join('\n');
@@ -322,7 +323,7 @@ async function fetchManifest(serverInfo, hostUrl) {
 // المسارات (Routes)
 // ==========================================
 
-app.get('/s/:encodedUrl/:filename', async (req, res) => {
+app.get('/s/:encodedUrl*', async (req, res) => {
     const decrypted = decryptUrl(req.params.encodedUrl);
     if (!decrypted) return res.status(403).send('Access Denied');
 
@@ -355,6 +356,9 @@ app.get('/s/:encodedUrl/:filename', async (req, res) => {
             ...customHeaders
         };
 
+        // ضبط Accept-Encoding كـ identity لمنع التعارض في الجلب الشبيه بكود الجافا
+        headers['Accept-Encoding'] = 'identity';
+
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
@@ -366,8 +370,8 @@ app.get('/s/:encodedUrl/:filename', async (req, res) => {
             validateStatus: status => status >= 200 && status < 500
         });
 
-        // إجبار نوع المحتوى ليكون Video/MP2T دائماً ليفهم المشغل Hls.js أن ملفات .js هذه هي أجزاء فيديو
-        res.setHeader('Content-Type', 'video/mp2t');
+        // إجبار المخرجات على صيغة video/MP2T ليتعرف عليها مشغل Web (Hls.js) مباشرة بدون رفض الامتداد .js
+        res.setHeader('Content-Type', 'video/MP2T');
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges');
@@ -383,6 +387,7 @@ app.get('/s/:encodedUrl/:filename', async (req, res) => {
         res.status(500).send('Proxy Segment Error');
     }
 });
+
 
 app.get('/api/matches', async (req, res) => {
     try {
