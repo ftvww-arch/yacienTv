@@ -161,9 +161,8 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات القنوات والسيرفرات
+// جلب معلومات القنوات والسيرفرات (معدّلة مع إضافة نظام الفحص والطباعة)
 // ==========================================
-// تم التعديل: تجنب تعطيل البث دائماً واسترجاع العنوان فقط
 async function getMatchInfo(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
@@ -195,7 +194,6 @@ async function getMatchInfo(realChannelName) {
             }
         }
 
-        // إرجاع متاحة دائماً بغض النظر عن حالة جدول المباريات
         return { isAvailable: true, title: matchTitle };
     } catch (e) {
         return { isAvailable: true, title: realChannelName }; 
@@ -203,10 +201,17 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
+    console.log(`[DEBUG] Attempting to fetch servers for: ${realChannelName}`);
+    
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
-        const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
-        if (!res.data || !res.data.servers || res.data.servers.length === 0) throw new Error('لا توجد بيانات بالقناة');
+        const jsonUrl = `${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`;
+        console.log(`[DEBUG] Fetching satellite channel JSON: ${jsonUrl}`);
+        const res = await axios.get(jsonUrl, { timeout: 8000 });
+        
+        if (!res.data || !res.data.servers || res.data.servers.length === 0) {
+            throw new Error(`القناة الفضائية ${channelId} لا تحتوي على سيرفرات ممررة في الملف`);
+        }
         
         return res.data.servers.map((srv, i) => ({
             name: srv.serverName || `سيرفر ${i + 1}`,
@@ -216,38 +221,87 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
-    const channelId = `live_tv_${realChannelName}`;
+    const channelId = realChannelName.startsWith('live_tv_') ? realChannelName : `live_tv_${realChannelName}`;
     let dataArray = null;
 
+    // المحاولة الأولى
     try {
-        const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { params: { id_live: channelId }, headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, timeout: 8000 });
-        if (response1.data && (!Array.isArray(response1.data) || response1.data.length > 0)) dataArray = Array.isArray(response1.data) ? response1.data : [response1.data];
-    } catch (e) {}
-
-    if (!dataArray || dataArray.length === 0) {
-        try {
-            const response2 = await axios.get(`${CONFIG.API_BASE_URL}/live_id/${channelId}`, { headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, timeout: 8000 });
-            if (response2.data) dataArray = Array.isArray(response2.data) ? response2.data : [response2.data];
-        } catch (e) {}
+        const url1 = `${CONFIG.API_BASE_URL}/stream`;
+        console.log(`[DEBUG] Fetching API 1: ${url1}?id_live=${channelId}`);
+        const response1 = await axios.get(url1, { 
+            params: { id_live: channelId }, 
+            headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, 
+            timeout: 8000 
+        });
+        
+        console.log(`[DEBUG] API 1 Response Data:`, JSON.stringify(response1.data));
+        
+        if (response1.data) {
+            if (Array.isArray(response1.data) && response1.data.length > 0) dataArray = response1.data;
+            else if (!Array.isArray(response1.data) && typeof response1.data === 'object') dataArray = [response1.data];
+        }
+    } catch (e) {
+        console.error(`[DEBUG] API 1 Failed: ${e.message}`);
     }
 
-    if (!dataArray || dataArray.length === 0) throw new Error('لا توجد بيانات');
+    // المحاولة الثانية في حال فشل الأولى
+    if (!dataArray || dataArray.length === 0) {
+        try {
+            const url2 = `${CONFIG.API_BASE_URL}/live_id/${channelId}`;
+            console.log(`[DEBUG] Fetching API 2: ${url2}`);
+            const response2 = await axios.get(url2, { 
+                headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, 
+                timeout: 8000 
+            });
+            
+            console.log(`[DEBUG] API 2 Response Data:`, JSON.stringify(response2.data));
+            
+            if (response2.data) {
+                if (Array.isArray(response2.data) && response2.data.length > 0) dataArray = response2.data;
+                else if (!Array.isArray(response2.data) && typeof response2.data === 'object') dataArray = [response2.data];
+            }
+        } catch (e) {
+            console.error(`[DEBUG] API 2 Failed: ${e.message}`);
+        }
+    }
+
+    if (!dataArray || dataArray.length === 0) {
+        throw new Error(`لم يتم إرجاع أي سيرفرات من الـ API لقناة ID: ${channelId}`);
+    }
 
     const servers = [];
     dataArray.forEach((srv, i) => {
-        if (srv.result !== 0 || !srv.data) return;
-        try {
-            let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
-            let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-            servers.push({ 
-                name: srv.name || `سيرفر ${i + 1}`, 
-                url: innerData.url, 
-                headers: innerData.headers || {}, 
-                swap: innerData.swap || null 
+        // فحص البنية ونتيجة الاستجابة
+        if (srv.data) {
+            try {
+                let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
+                let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
+                if (innerData.url) {
+                    servers.push({ 
+                        name: srv.name || `سيرفر ${i + 1}`, 
+                        url: innerData.url, 
+                        headers: innerData.headers || {}, 
+                        swap: innerData.swap || null 
+                    });
+                }
+            } catch (e) {
+                console.error(`[DEBUG] Error parsing server ${i}: ${e.message}`);
+            }
+        } else if (srv.url) {
+            // دعم الهياكل المباشرة
+            servers.push({
+                name: srv.name || `سيرفر ${i + 1}`,
+                url: srv.url,
+                headers: srv.headers || {},
+                swap: srv.swap || null
             });
-        } catch (e) {}
+        }
     });
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات');
+
+    if (servers.length === 0) {
+        throw new Error(`تمت الاستجابة من الـ API لكن لم يتم العثور على روابط تشغيل صالحة داخل كائن البيانات`);
+    }
+
     return servers;
 }
 
@@ -425,23 +479,39 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
-// تم التعديل: فتح المشغل مباشرة وتخطي حظر عدم التوفر
+// معدل لتتبع الخطأ وطباعته في الصفحة ومحركات السجل (Logs)
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
         const realChannel = decodeId(hash);
-        if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
+        console.log(`\n========================================`);
+        console.log(`[REQUEST] /play/${hash} -> Decoded Channel: ${realChannel}`);
+
+        if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح (Decryption failed)'));
 
         const matchInfo = await getMatchInfo(realChannel);
-
-        const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
+        
+        // استدعاء جلب السيرفرات مباشرة مع معالجة الأخطاء
+        const servers = await fetchChannelServers(realChannel);
+        
         const userIp = getClientIp(req);
         const secureToken = generateSecureToken(userIp);
         const hostUrl = `https://${req.get('host')}`;
         
         res.send(generateUI(hash, servers, secureToken, matchInfo.title, hostUrl)); 
     } catch (error) {
-        res.send(generateOfflineUI('البث غير متوفر حالياً'));
+        console.error(`[PLAY ERROR] ${error.message}`);
+        
+        // في حالة وجود كويري debug=true في الرابط يُرجع الخطأ كـ JSON
+        if (req.query.debug === 'true') {
+            return res.status(500).json({
+                error: true,
+                message: error.message,
+                stack: error.stack
+            });
+        }
+        
+        res.send(generateOfflineUI(`خطأ النظام: ${error.message}`));
     }
 });
 
@@ -665,7 +735,7 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
 
             <div class="right-controls">
                 <button class="control-icon-btn" id="embedBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M8.293 6.293a1 1 0 0 1 1.414 0L14.414 11H19a1 1 0 0 1 0 2h-4.586l-4.707 4.707a1 1 0 0 1-1.414-1.414L11.586 13H5a1 1 0 0 1 0-2h6.586L8.293 7.707a1 1 0 0 1 0-1.414z"/><path d="M19 19a1 1 0 1 1-2 0V5a1 1 0 0 1 2 0v14z"/></svg></button>
-                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></button>
+                <button class="control-icon-btn" id="settingsBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6-3.6z"/></svg></button>
                 <button class="control-icon-btn" id="fullscreenBtn"><svg class="icon-svg" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
             </div>
         </div>
@@ -941,7 +1011,7 @@ function generateOfflineUI(reasonMsg) {
         body { 
             margin: 0; padding: 0; 
             background: #000 url('https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1920&q=80') center/cover no-repeat; 
-            display: flex; justify-content: center; align-items: center; 
+            display: flex; justify-content: center; align- items: center; 
             height: 100vh; font-family: 'Tajawal', sans-serif; 
         }
         .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 12, 16, 0.88); z-index: 1; }
@@ -956,7 +1026,7 @@ function generateOfflineUI(reasonMsg) {
         .icon { width: 65px; height: 65px; fill: #5c4dff; animation: pulse 2s infinite ease-in-out; }
         @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.15); opacity: 0.7; } 100% { transform: scale(1); opacity: 1; } }
         h2 { color: #fff; margin-bottom: 12px; font-size: 26px; font-weight: 800; letter-spacing: 0.5px; }
-        .reason { color: #f59e0b; font-size: 18px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 6px 16px; border-radius: 8px; }
+        .reason { color: #f59e0b; font-size: 16px; margin-bottom: 20px; font-weight: 700; background: rgba(245, 158, 11, 0.15); display: inline-block; padding: 8px 16px; border-radius: 8px; word-break: break-word; }
         .message { color: #d1d5db; font-size: 15px; margin-bottom: 35px; line-height: 1.6; font-weight: 500; }
         .btn { 
             display: inline-block; background: linear-gradient(135deg, #5c4dff, #4a3be0); 
