@@ -177,6 +177,7 @@ async function getMatchInfo(realChannelName) {
         }
     }
 
+    // السماح بدخول القناة دائماً بدون التعليق على رسالة "غير متاحة"
     try {
         const matches = await CacheEngine.getOrFetch('matches_list', async () => {
             const res = await axios.get(`${CONFIG.API_BASE_URL}/mach`, { timeout: 5000 });
@@ -193,6 +194,7 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
+    // قنوات الساتلايت
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const res = await axios.get(`${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`, { timeout: 8000 });
@@ -206,6 +208,7 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
+    // تجهيز الـ ID بدون تكرار live_tv_
     let targetId = realChannelName;
     if (!targetId.startsWith('live_tv_') && !targetId.startsWith('sport_') && !targetId.startsWith('panel_')) {
         targetId = `live_tv_${targetId}`;
@@ -213,6 +216,7 @@ async function fetchChannelServers(realChannelName) {
 
     let dataArray = null;
 
+    // 1. المحاولة الأولى: /stream?id_live=...
     try {
         const response1 = await axios.get(`${CONFIG.API_BASE_URL}/stream`, { 
             params: { id_live: targetId }, 
@@ -224,6 +228,7 @@ async function fetchChannelServers(realChannelName) {
         }
     } catch (e) {}
 
+    // 2. المحاولة الثانية (إذا فشل الأول أو رجع فارغ): /last/id_live
     if (!dataArray || dataArray.length === 0) {
         try {
             const response2 = await axios.get(`${CONFIG.API_BASE_URL}/last/${targetId}`, { 
@@ -243,6 +248,7 @@ async function fetchChannelServers(realChannelName) {
         if (!srv.data) return;
         try {
             let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
+            // تجاهل السيرفرات الفارغة التي قيمتها ليست JSON أو رابط
             if (!rawUrl || rawUrl === "2" || rawUrl.length < 5) return;
 
             let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
@@ -257,14 +263,15 @@ async function fetchChannelServers(realChannelName) {
         } catch (e) {}
     });
 
-    if (servers.length === 0) throw new Error('لا توجد سيرفرات شغالة حالياً');
+    if (servers.length === 0) throw new Error('لا توجد سيرفرات شغال حالياً');
     return servers;
 }
 
 async function fetchManifest(serverInfo, hostUrl) {
     const parsedTarget = new URL(serverInfo.url);
-    const serverHeaders = serverInfo.headers || {};
     
+    // دمج الترويسات المطلوبة بدقة مع إعطاء الأولوية للـ User-Agent الخاص بالسيرفر (مثل OSCARTV2021)
+    const serverHeaders = serverInfo.headers || {};
     const headers = { 
         'User-Agent': serverHeaders['User-Agent'] || serverHeaders['user-agent'] || CONFIG.DEFAULT_USER_AGENT,
         'Accept': '*/*',
@@ -301,14 +308,16 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
+        // تشفير الرابط مع الترويسات الخاصة بالسيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
+        
+        // الحفاظ على مرونة الرابط المشفّر لتشغيل أجزاء الـ .js والـ .ts بدون مشاكل
         return `${hostUrl}/s/${encryptedSegment}/stream.ts`;
     });
 
     return rewrittenLines.join('\n');
 }
-
 // ==========================================
 // المسارات (Routes)
 // ==========================================
@@ -357,6 +366,7 @@ app.get('/s/:encodedUrl/:filename', async (req, res) => {
             validateStatus: status => status >= 200 && status < 500
         });
 
+        // إجبار نوع المحتوى ليكون Video/MP2T دائماً ليفهم المشغل Hls.js أن ملفات .js هذه هي أجزاء فيديو
         res.setHeader('Content-Type', 'video/mp2t');
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Access-Control-Allow-Origin', '*');
