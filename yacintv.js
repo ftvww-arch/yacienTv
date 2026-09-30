@@ -161,7 +161,7 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// جلب معلومات القنوات والسيرفرات (معدّلة مع إضافة نظام الفحص والطباعة)
+// جلب معلومات القنوات والسيرفرات
 // ==========================================
 async function getMatchInfo(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
@@ -201,16 +201,16 @@ async function getMatchInfo(realChannelName) {
 }
 
 async function fetchChannelServers(realChannelName) {
-    console.log(`[DEBUG] Attempting to fetch servers for: ${realChannelName}`);
+    console.log(`[DEBUG] Fetching servers for: ${realChannelName}`);
     
+    // 1. معالجة قنوات القمر الصناعي (sat_)
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
         const jsonUrl = `${CONFIG.TV_CHANNELS_BASE_URL}channel_${channelId}.json`;
-        console.log(`[DEBUG] Fetching satellite channel JSON: ${jsonUrl}`);
         const res = await axios.get(jsonUrl, { timeout: 8000 });
         
         if (!res.data || !res.data.servers || res.data.servers.length === 0) {
-            throw new Error(`القناة الفضائية ${channelId} لا تحتوي على سيرفرات ممررة في الملف`);
+            throw new Error(`القناة الفضائية ${channelId} لا تحتوي على سيرفرات`);
         }
         
         return res.data.servers.map((srv, i) => ({
@@ -221,85 +221,79 @@ async function fetchChannelServers(realChannelName) {
         }));
     }
 
-    const channelId = realChannelName.startsWith('live_tv_') ? realChannelName : `live_tv_${realChannelName}`;
-    let dataArray = null;
+    // 2. تجهيز معرف القناة
+    let cleanId = realChannelName;
+    if (cleanId.startsWith('live_tv_')) cleanId = cleanId.replace('live_tv_', '');
+    const channelId = `live_tv_${cleanId}`;
 
-    // المحاولة الأولى
+    let dataArray = [];
+
+    // المحاولة الأولى: عبر مسار /stream
     try {
-        const url1 = `${CONFIG.API_BASE_URL}/stream`;
-        console.log(`[DEBUG] Fetching API 1: ${url1}?id_live=${channelId}`);
-        const response1 = await axios.get(url1, { 
+        const urlStream = `${CONFIG.API_BASE_URL}/stream`;
+        console.log(`[DEBUG] Requesting: ${urlStream}?id_live=${channelId}`);
+        const res1 = await axios.get(urlStream, { 
             params: { id_live: channelId }, 
             headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, 
             timeout: 8000 
         });
-        
-        console.log(`[DEBUG] API 1 Response Data:`, JSON.stringify(response1.data));
-        
-        if (response1.data) {
-            if (Array.isArray(response1.data) && response1.data.length > 0) dataArray = response1.data;
-            else if (!Array.isArray(response1.data) && typeof response1.data === 'object') dataArray = [response1.data];
+
+        if (res1.data && Array.isArray(res1.data) && res1.data.length > 0) {
+            dataArray = res1.data;
         }
     } catch (e) {
-        console.error(`[DEBUG] API 1 Failed: ${e.message}`);
+        console.error(`[DEBUG] /stream failed: ${e.message}`);
     }
 
-    // المحاولة الثانية في حال فشل الأولى
+    // المحاولة الثانية: عبر مسار /last (في حال كان /stream فارغاً أو فشل)
     if (!dataArray || dataArray.length === 0) {
         try {
-            const url2 = `${CONFIG.API_BASE_URL}/live_id/${channelId}`;
-            console.log(`[DEBUG] Fetching API 2: ${url2}`);
-            const response2 = await axios.get(url2, { 
+            const urlLast = `${CONFIG.API_BASE_URL}/last/${channelId}`;
+            console.log(`[DEBUG] Requesting fallback: ${urlLast}`);
+            const res2 = await axios.get(urlLast, { 
                 headers: { 'User-Agent': CONFIG.DEFAULT_USER_AGENT }, 
                 timeout: 8000 
             });
-            
-            console.log(`[DEBUG] API 2 Response Data:`, JSON.stringify(response2.data));
-            
-            if (response2.data) {
-                if (Array.isArray(response2.data) && response2.data.length > 0) dataArray = response2.data;
-                else if (!Array.isArray(response2.data) && typeof response2.data === 'object') dataArray = [response2.data];
+
+            if (res2.data && res2.data.data) {
+                dataArray = [res2.data];
             }
         } catch (e) {
-            console.error(`[DEBUG] API 2 Failed: ${e.message}`);
+            console.error(`[DEBUG] /last failed: ${e.message}`);
         }
     }
 
     if (!dataArray || dataArray.length === 0) {
-        throw new Error(`لم يتم إرجاع أي سيرفرات من الـ API لقناة ID: ${channelId}`);
+        throw new Error(`لم يتم العثور على أي سيرفرات شغالة للقناة: ${channelId}`);
     }
 
+    // 3. تحليل وتنظيف السيرفرات واستبعاد الفارغة
     const servers = [];
     dataArray.forEach((srv, i) => {
-        // فحص البنية ونتيجة الاستجابة
-        if (srv.data) {
-            try {
-                let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
-                let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
-                if (innerData.url) {
-                    servers.push({ 
-                        name: srv.name || `سيرفر ${i + 1}`, 
-                        url: innerData.url, 
-                        headers: innerData.headers || {}, 
-                        swap: innerData.swap || null 
-                    });
-                }
-            } catch (e) {
-                console.error(`[DEBUG] Error parsing server ${i}: ${e.message}`);
+        if (!srv.data || !srv.data.url) return;
+
+        try {
+            let rawUrl = typeof srv.data.url === 'string' ? srv.data.url.trim() : '';
+            
+            if (rawUrl === "2" || rawUrl.length < 5) return;
+
+            let innerData = rawUrl.startsWith('{') ? JSON.parse(rawUrl) : { url: rawUrl };
+
+            if (innerData.url && innerData.url.startsWith('http')) {
+                servers.push({
+                    name: srv.name || srv.data.name || `سيرفر ${servers.length + 1}`,
+                    url: innerData.url,
+                    headers: innerData.headers || {},
+                    swap: innerData.swap || null
+                });
             }
-        } else if (srv.url) {
-            // دعم الهياكل المباشرة
-            servers.push({
-                name: srv.name || `سيرفر ${i + 1}`,
-                url: srv.url,
-                headers: srv.headers || {},
-                swap: srv.swap || null
-            });
+        } catch (e) {
+            console.error(`[DEBUG] Error parsing server ${i}: ${e.message}`);
         }
     });
 
     if (servers.length === 0) {
-        throw new Error(`تمت الاستجابة من الـ API لكن لم يتم العثور على روابط تشغيل صالحة داخل كائن البيانات`);
+        throw new Error(`جميع السيرفرات المرجعة من الـ API لهذه القناة مغلقة أو غير صالحة حالياً`);
     }
 
     return servers;
@@ -479,7 +473,6 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
-// معدل لتتبع الخطأ وطباعته في الصفحة ومحركات السجل (Logs)
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -491,7 +484,6 @@ app.get('/play/:hash', async (req, res) => {
 
         const matchInfo = await getMatchInfo(realChannel);
         
-        // استدعاء جلب السيرفرات مباشرة مع معالجة الأخطاء
         const servers = await fetchChannelServers(realChannel);
         
         const userIp = getClientIp(req);
@@ -502,7 +494,6 @@ app.get('/play/:hash', async (req, res) => {
     } catch (error) {
         console.error(`[PLAY ERROR] ${error.message}`);
         
-        // في حالة وجود كويري debug=true في الرابط يُرجع الخطأ كـ JSON
         if (req.query.debug === 'true') {
             return res.status(500).json({
                 error: true,
@@ -1011,7 +1002,7 @@ function generateOfflineUI(reasonMsg) {
         body { 
             margin: 0; padding: 0; 
             background: #000 url('https://images.unsplash.com/photo-1522778119026-d647f0596c20?auto=format&fit=crop&w=1920&q=80') center/cover no-repeat; 
-            display: flex; justify-content: center; align- items: center; 
+            display: flex; justify-content: center; align-items: center; 
             height: 100vh; font-family: 'Tajawal', sans-serif; 
         }
         .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 12, 16, 0.88); z-index: 1; }
