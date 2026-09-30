@@ -163,6 +163,7 @@ setInterval(() => {
 // ==========================================
 // جلب معلومات القنوات والسيرفرات
 // ==========================================
+// تم التعديل: تجنب تعطيل البث دائماً واسترجاع العنوان فقط
 async function getMatchInfo(realChannelName) {
     if (realChannelName.startsWith('sat_')) {
         const channelId = realChannelName.replace('sat_', '');
@@ -186,18 +187,15 @@ async function getMatchInfo(realChannelName) {
         const channelId = `live_tv_${realChannelName}`;
         const targetMatch = matches.find(m => m.id_live === channelId || m.channel === channelId);
 
-        if (!targetMatch) return { isAvailable: false, reason: 'المباراة غير مدرجة في جدول البث', title: realChannelName };
-        
-        const channelField = targetMatch.channel || targetMatch.id_live;
-        if (!channelField || channelField.trim() === '') {
-            return { isAvailable: false, reason: 'لا توجد قناة بث متاحة لهذه المباراة حالياً', title: realChannelName };
+        let matchTitle = realChannelName;
+        if (targetMatch) {
+            matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
+            if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
+                matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
+            }
         }
 
-        let matchTitle = targetMatch.title || targetMatch.name || targetMatch.match_name || realChannelName;
-        if (!targetMatch.title && targetMatch.team1 && targetMatch.team2) {
-            matchTitle = `${targetMatch.team1} vs ${targetMatch.team2}`;
-        }
-
+        // إرجاع متاحة دائماً بغض النظر عن حالة جدول المباريات
         return { isAvailable: true, title: matchTitle };
     } catch (e) {
         return { isAvailable: true, title: realChannelName }; 
@@ -298,7 +296,6 @@ async function fetchManifest(serverInfo, hostUrl) {
             absoluteLink += finalSearchParams;
         }
 
-        // تشفير الرابط + الهيدرز الخاصة بالسيرفر للحفاظ على User-Agent المطلوب لكل سيرفر
         const payload = JSON.stringify({ url: absoluteLink, headers });
         const encryptedSegment = encryptUrl(payload);
         return `${hostUrl}/s/${encryptedSegment}/segment.ts`;
@@ -428,6 +425,7 @@ app.get('/api/refresh-token', (req, res) => {
     res.json({ token: newToken });
 });
 
+// تم التعديل: فتح المشغل مباشرة وتخطي حظر عدم التوفر
 app.get('/play/:hash', async (req, res) => {
     try {
         const hash = req.params.hash;
@@ -435,7 +433,6 @@ app.get('/play/:hash', async (req, res) => {
         if (!realChannel) return res.send(generateOfflineUI('معرف القناة غير صالح'));
 
         const matchInfo = await getMatchInfo(realChannel);
-        if (!matchInfo.isAvailable) return res.send(generateOfflineUI(matchInfo.reason));
 
         const servers = await CacheEngine.getOrFetch(`servers_${realChannel}`, () => fetchChannelServers(realChannel), CONFIG.CACHE_DURATION);
         const userIp = getClientIp(req);
@@ -794,7 +791,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                 isPlaying = true;
                 updatePlayPauseUI();
             }).catch(() => {
-                // Autoplay Policy Fallback: تشغيل بدون صوت فوراً لتفادي التعليق
                 video.muted = true;
                 video.play().then(() => {
                     hideLoading();
@@ -813,7 +809,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             if (isManual) autoSwitchEnabled = false;
 
             if (loadWatchdogTimer) clearTimeout(loadWatchdogTimer);
-            // مؤقت حماية: إذا علّق السيرفر لأكثر من 6 ثوانٍ، يتم التحويل فوراً للسيرفر التالي
             loadWatchdogTimer = setTimeout(() => {
                 if (autoSwitchEnabled && totalServers > 1) {
                     let nextServer = (currentServerIndex + 1) % totalServers;
@@ -853,7 +848,6 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
                     attemptPlay();
                 });
 
-                // معالج الذكاء السريع عند حدوث تقطيع أو تعليق البث (Stalling Auto-Recovery)
                 hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
                         switch (data.type) {
@@ -883,14 +877,12 @@ function generateUI(channelHash, servers, secureToken, matchTitle, hostUrl) {
             serverPopup.style.display = 'none';
         }
 
-        // إنعاش البث عند حدوث التجمّد (Stall Monitor) بدون أن يشعر المستخدم ببطء
         video.addEventListener('stalled', () => {
             if (hls) hls.startLoad();
         });
         
         video.addEventListener('waiting', () => {
             if (hls && video.currentTime > 0) {
-                // قفزة تلقائية للنقطة الحية المباشرة في حال التعليق
                 if (video.buffered.length > 0) {
                     video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.5;
                 }
